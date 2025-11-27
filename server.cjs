@@ -8,7 +8,7 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-app.get("/", (req, res) => res.send("🚀 Close Master - Perfect Scoring ✅"));
+app.get("/", (req, res) => res.send("🚀 Close Master - Perfect ✅"));
 
 const MAX_PLAYERS = 7;
 const START_CARDS = 7;
@@ -75,29 +75,23 @@ io.on("connection",(s)=>{
     let rk=ur[0];if(rk==="J"){r.pendingSkips+=sel.length;}else if(rk==="7"){r.pendingDraw+=2*sel.length;}
     p.hasDrawn=false;advanceTurn(r);broadcast(r);
   });
-  
-  // ✅ PERFECT CLOSE SCORING
   s.on("action_close",d=>{
     let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
     let r=rooms.get(rId);if(!r.started||r.closeCalled||s.id!==r.turnId)return;
     r.closeCalled=true;
-    
     let closer=r.players.find(p=>p.id===s.id);
     let closerPts=closer?closer.hand.reduce((s,c)=>s+c.value,0):0;
-    
     r.players.forEach(p=>{
       let pts=p.hand.reduce((s,c)=>s+c.value,0);
       if(p.id===s.id || ptsloserPts){
-        p.score=0; // CLOSE player or LOWER → 0
+        p.score=0; // CLOSE or LOWER → 0
       }else{
         p.score=pts*2; // HIGHER → DOUBLE
       }
     });
-    
-    r.log.push(`🏁 CLOSE: ${closerPts}pts threshold`);
+    r.log.push(`🏁 CLOSE: ${closerPts}pts`);
     broadcast(r);
   });
-  
   s.on("disconnect",()=>{
     for(let[rid,r]of rooms){
       if(r.players.some(p=>p.id===s.id)){
@@ -111,4 +105,4 @@ io.on("connection",(s)=>{
   });
 });
 
-server.listen(process.env.PORT||3000,()=>console.log("🚀 Close Master Server - Perfect Scoring ✅"));
+server.listen(process.env.PORT||3000,()=>console.log("🚀 Close Master Server - Perfect ✅"));
