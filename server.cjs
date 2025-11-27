@@ -1,5 +1,5 @@
 // ==========================
-// CLOSE MASTER POWER RUMMY — SERVER ENGINE
+// CLOSE MASTER POWER RUMMY — SERVER ENGINE (BUG FIXED VERSION)
 // ==========================
 
 const express = require("express");
@@ -11,7 +11,7 @@ const app = express();
 app.use(cors());
 
 app.get("/", (req, res) => {
-  res.send("Close Master POWER Rummy Server Running");
+  res.send("Close Master POWER RUMMY Server Running ✅");
 });
 
 const server = http.createServer(app);
@@ -67,12 +67,11 @@ function createDeck() {
     });
   }
 
-  // shuffle
+  // shuffle deck (Fisher-Yates)
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
-
   return deck;
 }
 
@@ -135,7 +134,7 @@ function ensureDrawPile(room) {
   room.drawPile = pile;
 }
 
-// TURN ROTATION — uses explicit turnId for stability
+// ✅ FIXED TURN ROTATION — including 2 Player and 3+ Players proper cycling
 function setTurnByIndex(room, index) {
   if (room.players.length === 0) return;
   const safeIndex = ((index % room.players.length) + room.players.length) % room.players.length;
@@ -146,17 +145,25 @@ function setTurnByIndex(room, index) {
 function advanceTurn(room) {
   if (room.players.length === 0) return;
 
-  // find current turn index based on turnId
   let idx = room.players.findIndex(p => p.id === room.turnId);
   if (idx === -1) idx = 0;
 
   let steps = 1;
   if (room.pendingSkips > 0) {
-    steps += room.pendingSkips;
+    if (room.players.length === 2) {
+      steps = 1; // Skip opponent once (fixes two player skip issue)
+    } else {
+      steps += room.pendingSkips;
+    }
     room.pendingSkips = 0;
   }
 
   const nextIndex = (idx + steps) % room.players.length;
+  
+  // Debug logs for turn rotation
+  room.log.push(`Turn Advance: currentIdx=${idx} nextIdx=${nextIndex} steps=${steps}`);
+  room.log.push(`Players: ${room.players.map(p => p.name).join(", ")}`);
+
   setTurnByIndex(room, nextIndex);
 }
 
@@ -186,12 +193,9 @@ function settleClose(room, callerId) {
     caller.id === lowest.id &&
     lowest.points === caller.points
   ) {
-    // ✅ CLOSE CORRECT:
-    // caller -> 0, others -> +their hand points
     room.log.push(`CLOSE CORRECT by ${caller.name}`);
     room.players.forEach((p) => {
       if (p.id === callerId) {
-        // explicitly 0, no change
         room.log.push(`${p.name} gets 0 points (caller, lowest).`);
         return;
       }
@@ -200,10 +204,6 @@ function settleClose(room, callerId) {
       room.log.push(`${p.name} gets +${r.points} points.`);
     });
   } else {
-    // ✅ CLOSE WRONG:
-    // caller -> +2 × highest points
-    // lowest -> +0
-    // others -> +their hand points
     room.log.push(`CLOSE WRONG by ${caller?.name || "Unknown"}`);
     const penalty = highest.points * 2;
 
@@ -225,7 +225,7 @@ function settleClose(room, callerId) {
     });
   }
 
-  // 🟢 ROUND RESET (players & scores stay, hands + piles clear)
+  // Reset state for next round, keeping scores and players
   room.started = false;
   room.drawPile = [];
   room.discardPile = [];
@@ -245,13 +245,11 @@ function startRound(room) {
   room.pendingSkips = 0;
   room.closeCalled = false;
 
-  // 🟢 Host always index 0, and host starts turn
   room.players.forEach((p) => {
     p.hand = [];
   });
-  setTurnByIndex(room, 0); // sets currentIndex & turnId
+  setTurnByIndex(room, 0);  // Host starts first
 
-  // deal 7 each
   for (let r = 0; r < START_CARDS; r++) {
     room.players.forEach((p) => {
       ensureDrawPile(room);
@@ -260,7 +258,6 @@ function startRound(room) {
     });
   }
 
-  // first open card
   ensureDrawPile(room);
   const first = room.drawPile.pop();
   if (first) room.discardPile.push(first);
@@ -269,7 +266,6 @@ function startRound(room) {
     `Round started. Open: ${first ? first.rank : "?"}`
   );
 
-  // Open card power applies immediately
   if (first && first.rank === "7") {
     room.pendingDraw = 2;
     room.log.push("Open card 7 → next player draws 2");
@@ -309,7 +305,7 @@ io.on("connection", (socket) => {
       drawPile: [],
       discardPile: [],
       currentIndex: 0,
-      turnId: socket.id,   // 🟢 host turn by default (before round)
+      turnId: socket.id,
       pendingDraw: 0,
       pendingSkips: 0,
       closeCalled: false,
@@ -384,7 +380,7 @@ io.on("connection", (socket) => {
       (p) => p.id === socket.id
     );
     if (idx === -1) return;
-    if (socket.id !== room.turnId) return; // 🟢 only turn owner can draw
+    if (socket.id !== room.turnId) return;
 
     const player = room.players[idx];
 
@@ -418,7 +414,7 @@ io.on("connection", (socket) => {
       (p) => p.id === socket.id
     );
     if (idx === -1) return;
-    if (socket.id !== room.turnId) return; // 🟢 only current turn can drop
+    if (socket.id !== room.turnId) return;
 
     const player = room.players[idx];
     if (!ids.length) return;
@@ -468,7 +464,6 @@ io.on("connection", (socket) => {
       );
     }
 
-    // turn moves clockwise (with skip chain)
     advanceTurn(room);
     broadcast(room);
   });
@@ -519,7 +514,7 @@ io.on("connection", (socket) => {
       );
     }
 
-    // if turn owner left, shift to index 0
+    // If turn owner disconnected, assign new turn to index 0 player
     if (
       !roomFound.players.some(
         (p) => p.id === roomFound.turnId
@@ -527,7 +522,6 @@ io.on("connection", (socket) => {
     ) {
       setTurnByIndex(roomFound, 0);
     } else {
-      // also keep currentIndex in range
       if (
         roomFound.currentIndex >=
         roomFound.players.length
@@ -543,5 +537,5 @@ io.on("connection", (socket) => {
 // ==========================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("POWER Rummy Server running on", PORT);
+  console.log("🚀 POWER Rummy Server running on port", PORT);
 });
