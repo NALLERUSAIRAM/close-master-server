@@ -135,9 +135,20 @@ function ensureDrawPile(room) {
   room.drawPile = pile;
 }
 
-// TURN ROTATION – always clockwise, applies skip chain
+// TURN ROTATION — uses explicit turnId for stability
+function setTurnByIndex(room, index) {
+  if (room.players.length === 0) return;
+  const safeIndex = ((index % room.players.length) + room.players.length) % room.players.length;
+  room.currentIndex = safeIndex;
+  room.turnId = room.players[safeIndex].id;
+}
+
 function advanceTurn(room) {
   if (room.players.length === 0) return;
+
+  // find current turn index based on turnId
+  let idx = room.players.findIndex(p => p.id === room.turnId);
+  if (idx === -1) idx = 0;
 
   let steps = 1;
   if (room.pendingSkips > 0) {
@@ -145,8 +156,8 @@ function advanceTurn(room) {
     room.pendingSkips = 0;
   }
 
-  room.currentIndex =
-    (room.currentIndex + steps) % room.players.length;
+  const nextIndex = (idx + steps) % room.players.length;
+  setTurnByIndex(room, nextIndex);
 }
 
 // SCORE & CLOSE HANDLING
@@ -175,24 +186,41 @@ function settleClose(room, callerId) {
     caller.id === lowest.id &&
     lowest.points === caller.points
   ) {
-    // CLOSE correct
+    // ✅ CLOSE CORRECT:
+    // caller -> 0, others -> +their hand points
     room.log.push(`CLOSE CORRECT by ${caller.name}`);
     room.players.forEach((p) => {
-      if (p.id === callerId) return;
+      if (p.id === callerId) {
+        // explicitly 0, no change
+        room.log.push(`${p.name} gets 0 points (caller, lowest).`);
+        return;
+      }
       const r = results.find((x) => x.id === p.id);
       p.score += r.points;
+      room.log.push(`${p.name} gets +${r.points} points.`);
     });
   } else {
-    // CLOSE wrong
+    // ✅ CLOSE WRONG:
+    // caller -> +2 × highest points
+    // lowest -> +0
+    // others -> +their hand points
     room.log.push(`CLOSE WRONG by ${caller?.name || "Unknown"}`);
     const penalty = highest.points * 2;
+
     room.players.forEach((p) => {
+      const r = results.find((x) => x.id === p.id);
       if (p.id === callerId) {
         p.score += penalty;
+        room.log.push(
+          `${p.name} gets penalty +${penalty} (2x highest ${highest.points}).`
+        );
+      } else if (r.id === lowest.id) {
+        room.log.push(
+          `${p.name} gets 0 points (lowest hand, protected).`
+        );
       } else {
-        const r = results.find((x) => x.id === p.id);
-        if (r.id === lowest.id) return;
         p.score += r.points;
+        room.log.push(`${p.name} gets +${r.points} points.`);
       }
     });
   }
@@ -204,6 +232,7 @@ function settleClose(room, callerId) {
   room.pendingDraw = 0;
   room.pendingSkips = 0;
   room.currentIndex = 0;
+  room.turnId = room.players[0].id;
   room.players.forEach((p) => {
     p.hand = [];
   });
@@ -216,12 +245,11 @@ function startRound(room) {
   room.pendingSkips = 0;
   room.closeCalled = false;
 
-  // 🟢 Host always starts – index 0
-  room.currentIndex = 0;
-
+  // 🟢 Host always index 0, and host starts turn
   room.players.forEach((p) => {
     p.hand = [];
   });
+  setTurnByIndex(room, 0); // sets currentIndex & turnId
 
   // deal 7 each
   for (let r = 0; r < START_CARDS; r++) {
@@ -281,6 +309,7 @@ io.on("connection", (socket) => {
       drawPile: [],
       discardPile: [],
       currentIndex: 0,
+      turnId: socket.id,   // 🟢 host turn by default (before round)
       pendingDraw: 0,
       pendingSkips: 0,
       closeCalled: false,
@@ -355,7 +384,7 @@ io.on("connection", (socket) => {
       (p) => p.id === socket.id
     );
     if (idx === -1) return;
-    if (idx !== room.currentIndex) return; // not your turn
+    if (socket.id !== room.turnId) return; // 🟢 only turn owner can draw
 
     const player = room.players[idx];
 
@@ -389,7 +418,7 @@ io.on("connection", (socket) => {
       (p) => p.id === socket.id
     );
     if (idx === -1) return;
-    if (idx !== room.currentIndex) return; // not your turn
+    if (socket.id !== room.turnId) return; // 🟢 only current turn can drop
 
     const player = room.players[idx];
     if (!ids.length) return;
@@ -439,6 +468,7 @@ io.on("connection", (socket) => {
       );
     }
 
+    // turn moves clockwise (with skip chain)
     advanceTurn(room);
     broadcast(room);
   });
@@ -455,7 +485,7 @@ io.on("connection", (socket) => {
       (p) => p.id === socket.id
     );
     if (idx === -1) return;
-    if (idx !== room.currentIndex) return;
+    if (socket.id !== room.turnId) return;
 
     settleClose(room, socket.id);
     broadcast(room);
@@ -489,8 +519,21 @@ io.on("connection", (socket) => {
       );
     }
 
-    if (roomFound.currentIndex >= roomFound.players.length) {
-      roomFound.currentIndex = 0;
+    // if turn owner left, shift to index 0
+    if (
+      !roomFound.players.some(
+        (p) => p.id === roomFound.turnId
+      )
+    ) {
+      setTurnByIndex(roomFound, 0);
+    } else {
+      // also keep currentIndex in range
+      if (
+        roomFound.currentIndex >=
+        roomFound.players.length
+      ) {
+        setTurnByIndex(roomFound, 0);
+      }
     }
 
     broadcast(roomFound);
