@@ -8,8 +8,6 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-app.get("/", (req, res) => res.send("🚀 Close Master Server ✅"));
-
 const MAX_PLAYERS = 7;
 const START_CARDS = 7;
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
@@ -27,119 +25,279 @@ function createDeck() {
 
 const rooms = new Map();
 
-function roomStateFor(room,pid){
-  let top=room.discardPile[room.discardPile.length-1]||null,p=room.players.find(x=>x.id===pid);
-  return{
-    roomId:room.roomId,
-    youId:pid,
-    hostId:room.hostId,  // ✅ HOST ID - START GAME కోసం
-    started:room.started,
-    closeCalled:room.closeCalled,
-    currentIndex:room.currentIndex,
-    discardTop:top,
-    pendingDraw:room.pendingDraw||0,
-    pendingSkips:room.pendingSkips||0,
-    hasDrawn:p?.hasDrawn||false,
-    matchingOpenCardCount:p? p.hand.filter(c=>c.rank===top?.rank).length:0,
-    players:room.players.map(p=>({
-      id:p.id,name:p.name,score:p.score,
-      hand:p.id===pid?p.hand:[],
-      handSize:p.hand.length,hasDrawn:p.hasDrawn
+function roomStateFor(room, pid){
+  const discardTop = room.discardPile.length ? room.discardPile[room.discardPile.length-1] : null;
+  const player = room.players.find(p => p.id === pid);
+  return {
+    roomId: room.roomId,
+    hostId: room.hostId,
+    youId: pid,
+    started: room.started,
+    closeCalled: room.closeCalled,
+    currentIndex: room.currentIndex,
+    turnId: room.turnId,
+    discardTop,
+    pendingDraw: room.pendingDraw || 0,
+    pendingSkips: room.pendingSkips || 0,
+    hasDrawn: player?.hasDrawn || false,
+    matchingOpenCardCount: player ? player.hand.filter(c => c.rank === discardTop?.rank).length : 0,
+    players: room.players.map(p => ({
+      id: p.id,
+      name: p.name,
+      score: p.score,
+      hand: p.id === pid ? p.hand : [],
+      handSize: p.hand.length,
+      hasDrawn: p.hasDrawn,
     })),
-    log:room.log.slice(-10)
+    log: room.log.slice(-20),
   };
 }
 
-function broadcast(r){r.players.forEach(p=>io.to(p.id).emit("game_state",roomStateFor(r,p.id)));}
-function randomRoomId(){return Array(4).fill().map(()=> "ABCDEFGHJKLMNPQRSTUVWXYZ"[Math.floor(Math.random()*24)]).join('');}
-function ensureDrawPile(r){if(r.drawPile.length>0)return;if(r.discardPile.length<=1)return;let t=r.discardPile.pop(),p=r.discardPile;r.discardPile=[t];for(let i=p.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[p[i],p[j]]=[p[j],p[i]];}r.drawPile=p;}
-function setTurnByIndex(r,i){if(!r.players.length)return;r.currentIndex=((i%r.players.length+r.players.length)%r.players.length);r.turnId=r.players[r.currentIndex].id;r.players.forEach(p=>p.hasDrawn=false);}
-function advanceTurn(r){let i=r.players.findIndex(p=>p.id===r.turnId);if(i===-1)i=0;let s=1;if(r.pendingSkips>0){s+=r.pendingSkips;r.pendingSkips=0;}let n=(i+s)%r.players.length;r.log.push(`Turn→${r.players[n].name}`);setTurnByIndex(r,n);}
-function startRound(r){r.drawPile=createDeck();r.discardPile=[];r.pendingDraw=r.pendingSkips=r.closeCalled=0;r.started=true;r.players.forEach(p=>{p.hand=[];p.hasDrawn=false;p.score=0;});setTurnByIndex(r,0);for(let i=0;i<START_CARDS;i++)r.players.forEach(p=>{ensureDrawPile(r);let c=r.drawPile.pop();if(c)p.hand.push(c);});ensureDrawPile(r);let fc=r.drawPile.pop();if(fc){r.discardPile.push(fc);r.log.push(`Open:${fc.rank}`);if(fc.rank==="7")r.pendingDraw=2;else if(fc.rank==="J")r.pendingSkips=1;}broadcast(r);}
+function broadcast(room) {
+  room.players.forEach(p => io.to(p.id).emit("game_state", roomStateFor(room, p.id)));
+}
 
-io.on("connection",(s)=>{
-  console.log(`🔌${s.id}`);
+function randomRoomId() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
+  let id = "";
+  for(let i=0; i<4; i++) id += chars.charAt(Math.floor(Math.random()*chars.length));
+  return id;
+}
+
+function ensureDrawPile(room) {
+  if(room.drawPile.length > 0) return;
+  if(room.discardPile.length <= 1) return;
+  const topCard = room.discardPile.pop();
+  let pile = room.discardPile;
+  room.discardPile = [topCard];
+  for(let i=pile.length-1; i>0; i--) {
+    let j = Math.floor(Math.random()*(i+1));
+    [pile[i], pile[j]] = [pile[j], pile[i]];
+  }
+  room.drawPile = pile;
+}
+
+function setTurnByIndex(room, index) {
+  if(room.players.length === 0) return;
+  room.currentIndex = ((index % room.players.length) + room.players.length) % room.players.length;
+  room.turnId = room.players[room.currentIndex].id;
+  room.players.forEach(p => p.hasDrawn = false);
+}
+
+function advanceTurn(room) {
+  if(room.players.length === 0) return;
+  let idx = room.players.findIndex(p => p.id === room.turnId);
+  if(idx === -1) idx = 0;
+
+  let steps = 1;
+  if(room.pendingSkips > 0) {
+    steps += room.pendingSkips;
+    room.pendingSkips = 0;
+  }
   
-  s.on("create_room",(d,cb)=>{
-    let n=(d?.name||"Player").trim().slice(0,15)||"Player",rId;
-    do rId=randomRoomId();while(rooms.has(rId));
-    let r={
-      roomId:rId,
-      hostId:s.id,  // ✅ HOST SET
-      players:[{id:s.id,name:n,score:0,hand:[],hasDrawn:false}],
-      started:false,drawPile:[],discardPile:[],currentIndex:0,turnId:s.id,
-      pendingDraw:0,pendingSkips:0,closeCalled:false,log:[]
-    };
-    rooms.set(rId,r);s.join(rId);r.log.push(`${n} created`);cb({roomId:rId,success:true});broadcast(r);
+  let nextIndex = (idx + steps) % room.players.length;
+  room.log.push(`Turn: ${room.players[idx].name} -> ${room.players[nextIndex].name}`);
+  setTurnByIndex(room, nextIndex);
+}
+
+function startRound(room) {
+  room.drawPile = createDeck();
+  room.discardPile = [];
+  room.pendingDraw = 0;
+  room.pendingSkips = 0;
+  room.closeCalled = false;
+  room.started = true;
+
+  room.players.forEach(player => {
+    player.hand = [];
+    player.hasDrawn = false;
   });
-  
-  s.on("join_room",(d,cb)=>{
-    let rId=(d?.roomId||"").trim().toUpperCase(),n=(d?.name||"Player").trim().slice(0,15)||"Player";
-    if(!rId)return cb({error:"Room ID?"});
-    if(!rooms.has(rId))return cb({error:`${rId} not found`});
-    let r=rooms.get(rId);
-    if(r.players.length>=MAX_PLAYERS)return cb({error:"Full"});
-    if(r.started)return cb({error:"Started"});
-    r.players.push({id:s.id,name:n,score:0,hand:[],hasDrawn:false});
-    s.join(rId);r.log.push(`${n} joined(${r.players.length}/${MAX_PLAYERS})`);
-    cb({roomId:rId,success:true});broadcast(r);
-  });
-  
-  s.on("start_round",d=>{
-    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
-    let r=rooms.get(rId);
-    if(r.hostId!==s.id||r.players.length<2)return;  // ✅ HOST ONLY
-    startRound(r);
-  });
-  
-  s.on("action_draw",d=>{
-    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
-    let r=rooms.get(rId);if(!r.started||r.closeCalled||s.id!==r.turnId)return;
-    let p=r.players.find(x=>x.id===s.id);if(!p||p.hasDrawn)return;
-    let c=r.pendingDraw>0?r.pendingDraw:1,fd=d?.fromDiscard||false;
-    for(let i=0;i;i++){
-      let card=fd&&r.discardPile.length>0?r.discardPile.pop():ensureDrawPile(r),r.drawPile.pop();
-      if(card)p.hand.push(card);
-    }
-    p.hasDrawn=true;r.pendingDraw=0;r.log.push(`${p.name} drew`);broadcast(r);
-  });
-  
-  s.on("action_drop",d=>{
-    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
-    let r=rooms.get(rId);if(!r.started||r.closeCalled||s.id!==r.turnId)return;
-    let p=r.players.find(x=>x.id===s.id),ids=d?.selectedIds||[],sel=p.hand.filter(c=>ids.includes(c.id));
-    if(sel.length===0)return;let ur=[...new Set(sel.map(c=>c.rank))];if(ur.length!==1)return;
-    let oc=r.discardPile[r.discardPile.length-1],cdw=oc&&ur[0]===oc.rank;
-    if(!p.hasDrawn&&!cdw)return;p.hand=p.hand.filter(c=>!ids.includes(c.id));
-    sel.forEach(c=>r.discardPile.push(c));let rk=ur[0];
-    if(rk==="J")r.pendingSkips+=sel.length;else if(rk==="7")r.pendingDraw+=2*sel.length;
-    p.hasDrawn=false;advanceTurn(r);broadcast(r);
-  });
-  
-  s.on("action_close",d=>{
-    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
-    let r=rooms.get(rId);if(!r.started||r.closeCalled||s.id!==r.turnId)return;
-    r.closeCalled=true;let closer=r.players.find(p=>p.id===s.id);
-    let closerPts=closer?closer.hand.reduce((s,c)=>s+c.value,0):0;
-    r.players.forEach(p=>{
-      let pts=p.hand.reduce((s,c)=>s+c.value,0);
-      p.score=p.id===s.id||ptsloserPts?0:pts*2;  // ✅ PERFECT SCORING
+  setTurnByIndex(room, 0);
+
+  for(let i=0; i<START_CARDS; i++) {
+    room.players.forEach(player => {
+      ensureDrawPile(room);
+      let card = room.drawPile.pop();
+      if(card) player.hand.push(card);
     });
-    r.log.push(`🏁 CLOSE:${closerPts}pts`);broadcast(r);
+  }
+
+  ensureDrawPile(room);
+  let firstCard = room.drawPile.pop();
+  if(firstCard){
+    room.discardPile.push(firstCard);
+    room.log.push(`Open card: ${firstCard.rank}${firstCard.suit||""}`);
+
+    if(firstCard.rank === "7") room.pendingDraw = 2;
+    else if(firstCard.rank === "J") room.pendingSkips = 1;
+  }
+  broadcast(room);
+}
+
+io.on("connection", socket => {
+  console.log(`Connected: ${socket.id}`);
+
+  socket.on("create_room", (data, cb) => {
+    const name = (data?.name || "Player").trim().slice(0,15) || "Player";
+
+    let roomId;
+    do {
+      roomId = randomRoomId();
+    } while(rooms.has(roomId));
+
+    const room = {
+      roomId,
+      hostId: socket.id,
+      players: [{ id: socket.id, name, score: 0, hand: [], hasDrawn: false }],
+      started: false,
+      drawPile: [],
+      discardPile: [],
+      currentIndex: 0,
+      turnId: socket.id,
+      pendingDraw: 0,
+      pendingSkips: 0,
+      closeCalled: false,
+      log: []
+    };
+
+    rooms.set(roomId, room);
+    socket.join(roomId);
+    room.log.push(`${name} created room`);
+    console.log(`Room created: ${roomId} by ${name}`);
+
+    cb({ roomId, success: true });
+    broadcast(room);
   });
-  
-  s.on("disconnect",()=>{
-    for(let[rid,r]of rooms){
-      if(r.players.some(p=>p.id===s.id)){
-        let idx=r.players.findIndex(p=>p.id===s.id);
-        let name=r.players[idx].name;r.players.splice(idx,1);
-        if(r.players.length===0){rooms.delete(rid);break;}
-        if(r.hostId===s.id){r.hostId=r.players[0]?.id;}  // ✅ NEW HOST
-        if(!r.players.some(p=>p.id===r.turnId))setTurnByIndex(r,0);
-        broadcast(r);break;
+
+  socket.on("join_room", (data, cb) => {
+    const roomId = (data?.roomId || "").trim().toUpperCase();
+    const name = (data?.name || "Player").trim().slice(0,15) || "Player";
+
+    if(!roomId) return cb({ error: "Room ID required" });
+    if(!rooms.has(roomId)) return cb({ error: `Room ${roomId} not found` });
+    const room = rooms.get(roomId);
+
+    if(room.players.length >= MAX_PLAYERS) return cb({ error: "Room full" });
+    if(room.started) return cb({ error: "Game already started" });
+
+    room.players.push({ id: socket.id, name, score: 0, hand: [], hasDrawn: false });
+    socket.join(roomId);
+    room.log.push(`${name} joined the room`);
+
+    cb({ roomId, success: true });
+    broadcast(room);
+  });
+
+  socket.on("start_round", data => {
+    const roomId = data?.roomId;
+    if(!roomId || !rooms.has(roomId)) return;
+    const room = rooms.get(roomId);
+    if(room.hostId !== socket.id) return;
+    if(room.players.length < 2) return;
+
+    startRound(room);
+  });
+
+  socket.on("action_draw", data => {
+    const roomId = data?.roomId;
+    if(!roomId || !rooms.has(roomId)) return;
+    const room = rooms.get(roomId);
+
+    if(!room.started || room.closeCalled || socket.id !== room.turnId) return;
+    const player = room.players.find(p => p.id === socket.id);
+    if(!player || player.hasDrawn) return;
+
+    const count = room.pendingDraw > 0 ? room.pendingDraw : 1;
+    const fromDiscard = data?.fromDiscard || false;
+
+    for(let i=0; i<count; i++) {
+      let card;
+      if(fromDiscard && room.discardPile.length > 0) card = room.discardPile.pop();
+      else {
+        ensureDrawPile(room);
+        card = room.drawPile.pop();
+      }
+      if(card) player.hand.push(card);
+    }
+    player.hasDrawn = true;
+    room.pendingDraw = 0;
+    broadcast(room);
+  });
+
+  socket.on("action_drop", data => {
+    const roomId = data?.roomId;
+    if(!roomId || !rooms.has(roomId)) return;
+    const room = rooms.get(roomId);
+
+    if(!room.started || room.closeCalled || socket.id !== room.turnId) return;
+    const player = room.players.find(p => p.id === socket.id);
+    const ids = data?.selectedIds || [];
+    const selectedCards = player.hand.filter(c => ids.includes(c.id));
+    if(selectedCards.length === 0) return;
+
+    const ranks = [...new Set(selectedCards.map(c => c.rank))];
+    if(ranks.length !== 1) return;
+
+    const openCard = room.discardPile[room.discardPile.length - 1];
+    const canDropWithoutDraw = openCard && ranks[0] === openCard.rank;
+
+    if(!player.hasDrawn && !canDropWithoutDraw) return;
+
+    player.hand = player.hand.filter(c => !ids.includes(c.id));
+    selectedCards.forEach(c => room.discardPile.push(c));
+
+    if(ranks[0] === "J") room.pendingSkips += selectedCards.length;
+    else if(ranks[0] === "7") room.pendingDraw += 2 * selectedCards.length;
+
+    player.hasDrawn = false;
+    advanceTurn(room);
+    broadcast(room);
+  });
+
+  socket.on("action_close", data => {
+    const roomId = data?.roomId;
+    if(!roomId || !rooms.has(roomId)) return;
+    const room = rooms.get(roomId);
+
+    if(!room.started || room.closeCalled || socket.id !== room.turnId) return;
+
+    room.closeCalled = true;
+
+    const closer = room.players.find(p => p.id === socket.id);
+    const closerPts = closer ? closer.hand.reduce((s, c) => s + c.value, 0) : 0;
+
+    room.players.forEach(p => {
+      const pts = p.hand.reduce((s, c) => s + c.value, 0);
+      p.score = p.id === socket.id || pts < closerPts ? 0 : pts * 2;
+    });
+
+    room.log.push(`Close called by ${closer?.name} (${closerPts} pts)`);
+    broadcast(room);
+  });
+
+  socket.on("disconnect", () => {
+    for(const [roomId, room] of rooms){
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if(idx !== -1){
+        const name = room.players[idx].name;
+        room.players.splice(idx, 1);
+        room.log.push(`${name} disconnected`);
+
+        if(room.players.length === 0){
+          rooms.delete(roomId);
+          break;
+        }
+
+        if(room.hostId === socket.id) room.hostId = room.players[0]?.id;
+
+        if(!room.players.some(p => p.id === room.turnId)) setTurnByIndex(room, 0);
+
+        broadcast(room);
+        break;
       }
     }
   });
 });
 
-server.listen(process.env.PORT||3000,()=>console.log("🚀 Close Master Server ✅"));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 Close Master Server running on port ${PORT}`));
