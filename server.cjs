@@ -4,365 +4,111 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 
 const app = express();
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"]
-}));
-
-app.get("/", (req, res) => {
-  res.send("🚀 Close Master POWER RUMMY - 7 CARDS ✅ ALL RULES FIXED");
-});
-
+app.use(cors());
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-// ========================================
-// GAME CONSTANTS - 7 CARDS FIXED
-// ========================================
+app.get("/", (req, res) => res.send("🚀 Close Master - Perfect Scoring ✅"));
+
 const MAX_PLAYERS = 7;
-const START_CARDS = 7;  // ✅ FIXED: 7 cards per player
-const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-const SUITS = ["♠", "♥", "♦", "♣"];
+const START_CARDS = 7;
+const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+const SUITS = ["♠","♥","♦","♣"];
 let globalCardId = 1;
 
-function cardValue(rank) {
-  if (rank === "A") return 1;
-  if (rank === "JOKER") return 0;
-  if (["J", "Q", "K"].includes(rank)) return 10;
-  return parseInt(rank) || 0;
-}
-
+function cardValue(r) { return r==="A"?1:r==="JOKER"?0:["J","Q","K"].includes(r)?10:parseInt(r)||0; }
 function createDeck() {
-  const deck = [];
-  for (const s of SUITS) {
-    for (const r of RANKS) {
-      deck.push({ id: globalCardId++, suit: s, rank: r, value: cardValue(r) });
-    }
-  }
-  for (let i = 0; i < 2; i++) {
-    deck.push({ id: globalCardId++, suit: null, rank: "JOKER", value: 0 });
-  }
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
+  let deck = [];
+  for(let s of SUITS)for(let r of RANKS)deck.push({id:globalCardId++,suit:s,rank:r,value:cardValue(r)});
+  for(let i=0;i<2;i++)deck.push({id:globalCardId++,suit:null,rank:"JOKER",value:0});
+  for(let i=deck.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[deck[i],deck[j]]=[deck[j],deck[i]];}
   return deck;
 }
 
 const rooms = new Map();
 
-function roomStateFor(room, pid) {
-  const discardTop = room.discardPile[room.discardPile.length - 1] || null;
-  const player = room.players.find(p => p.id === pid);
+function roomStateFor(room,pid){
+  let top=room.discardPile[room.discardPile.length-1]||null,p=room.players.find(x=>x.id===pid);
+  return{roomId:room.roomId,youId:pid,hostId:room.hostId,started:room.started,closeCalled:room.closeCalled,
+    currentIndex:room.currentIndex,discardTop:top,pendingDraw:room.pendingDraw,pendingSkips:room.pendingSkips,
+    hasDrawn:p?.hasDrawn||false,matchingOpenCardCount:p? p.hand.filter(c=>c.rank===top?.rank).length:0,
+    players:room.players.map(p=>({id:p.id,name:p.name,score:p.score,hand:p.id===pid?p.hand:[],handSize:p.hand.length,hasDrawn:p.hasDrawn})),
+    log:room.log.slice(-10)}};
+}
+
+function broadcast(r){r.players.forEach(p=>io.to(p.id).emit("game_state",roomStateFor(r,p.id)));}
+function randomRoomId(){return Array(4).fill().map(()=> "ABCDEFGHJKLMNPQRSTUVWXYZ"[Math.floor(Math.random()*24)]).join('');}
+function ensureDrawPile(r){if(r.drawPile.length>0)return;if(r.discardPile.length<=1)return;let t=r.discardPile.pop(),p=r.discardPile;r.discardPile=[t];for(let i=p.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[p[i],p[j]]=[p[j],p[i]];}r.drawPile=p;}
+function setTurnByIndex(r,i){if(!r.players.length)return;r.currentIndex=((i%r.players.length+r.players.length)%r.players.length);r.turnId=r.players[r.currentIndex].id;r.players.forEach(p=>p.hasDrawn=false);}
+function advanceTurn(r){let i=r.players.findIndex(p=>p.id===r.turnId);if(i===-1)i=0;let s=1;if(r.pendingSkips>0){s+=r.pendingSkips;r.pendingSkips=0;}let n=(i+s)%r.players.length;r.log.push(`Turn→${r.players[n].name}`);setTurnByIndex(r,n);}
+function startRound(r){r.drawPile=createDeck();r.discardPile=[];r.pendingDraw=r.pendingSkips=r.closeCalled=0;r.started=true;r.players.forEach(p=>{p.hand=[];p.hasDrawn=false;p.score=0;});setTurnByIndex(r,0);for(let i=0;i<START_CARDS;i++)r.players.forEach(p=>{ensureDrawPile(r);let c=r.drawPile.pop();if(c)p.hand.push(c);});ensureDrawPile(r);let fc=r.drawPile.pop();if(fc){r.discardPile.push(fc);r.log.push(`Open:${fc.rank}`);if(fc.rank==="7")r.pendingDraw=2;else if(fc.rank==="J")r.pendingSkips=1;}broadcast(r);}
+
+io.on("connection",(s)=>{
+  console.log(`🔌${s.id}`);
+  s.on("create_room",(d,cb)=>{
+    let n=(d?.name||"Player").trim().slice(0,15)||"Player",rId;
+    do rId=randomRoomId();while(rooms.has(rId));
+    let r={roomId:rId,hostId:s.id,players:[{id:s.id,name:n,score:0,hand:[],hasDrawn:false}],started:false,drawPile:[],discardPile:[],currentIndex:0,turnId:s.id,pendingDraw:0,pendingSkips:0,closeCalled:false,log:[]};
+    rooms.set(rId,r);s.join(rId);r.log.push(`${n} created`);cb({roomId:rId,success:true});broadcast(r);
+  });
+  s.on("join_room",(d,cb)=>{
+    let rId=(d?.roomId||"").trim().toUpperCase(),n=(d?.name||"Player").trim().slice(0,15)||"Player";
+    if(!rId)return cb({error:"Room ID?"});if(!rooms.has(rId))return cb({error:`${rId} not found`});
+    let r=rooms.get(rId);if(r.players.length>=MAX_PLAYERS)return cb({error:"Full"});if(r.started)return cb({error:"Started"});
+    r.players.push({id:s.id,name:n,score:0,hand:[],hasDrawn:false});s.join(rId);r.log.push(`${n} joined(${r.players.length}/${MAX_PLAYERS})`);
+    cb({roomId:rId,success:true});broadcast(r);
+  });
+  s.on("start_round",d=>{let rId=d?.roomId;if(!rId||!rooms.has(rId))return;let r=rooms.get(rId);if(r.hostId!==s.id||r.players.length<2)return;startRound(r);});
+  s.on("action_draw",d=>{
+    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;let r=rooms.get(rId);
+    if(!r.started||r.closeCalled||s.id!==r.turnId)return;let p=r.players.find(x=>x.id===s.id);if(!p||p.hasDrawn)return;
+    let c=r.pendingDraw>0?r.pendingDraw:1,fd=d?.fromDiscard||false;
+    for(let i=0;i;i++){let card;card=fd&&r.discardPile.length>0?r.discardPile.pop():ensureDrawPile(r)?r.drawPile.pop():null;if(card)p.hand.push(card);}
+    p.hasDrawn=true;r.pendingDraw=0;broadcast(r);
+  });
+  s.on("action_drop",d=>{
+    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;let r=rooms.get(rId);
+    if(!r.started||r.closeCalled||s.id!==r.turnId)return;let p=r.players.find(x=>x.id===s.id),ids=d?.selectedIds||[],sel=p.hand.filter(c=>ids.includes(c.id));
+    if(sel.length===0)return;let ur=[...new Set(sel.map(c=>c.rank))];if(ur.length!==1)return;
+    let oc=r.discardPile[r.discardPile.length-1],cdw=oc&&ur[0]===oc.rank;if(!p.hasDrawn&&!cdw)return;
+    p.hand=p.hand.filter(c=>!ids.includes(c.id));sel.forEach(c=>r.discardPile.push(c));
+    let rk=ur[0];if(rk==="J"){r.pendingSkips+=sel.length;}else if(rk==="7"){r.pendingDraw+=2*sel.length;}
+    p.hasDrawn=false;advanceTurn(r);broadcast(r);
+  });
   
-  return {
-    roomId: room.roomId,
-    youId: pid,
-    hostId: room.hostId,
-    started: room.started,
-    closeCalled: room.closeCalled,
-    currentIndex: room.currentIndex,
-    discardTop,
-    pendingDraw: room.pendingDraw || 0,
-    pendingSkips: room.pendingSkips || 0,
-    hasDrawn: player?.hasDrawn || false,
-    matchingOpenCardCount: player ? player.hand.filter(c => c.rank === discardTop?.rank).length : 0,
-    players: room.players.map((p) => ({
-      id: p.id,
-      name: p.name,
-      score: p.score,
-      hand: p.id === pid ? p.hand : [],
-      handSize: p.hand.length,
-      hasDrawn: p.hasDrawn,
-    })),
-    log: room.log.slice(-15),
-  };
-}
-
-function broadcast(room) {
-  room.players.forEach((p) => {
-    io.to(p.id).emit("game_state", roomStateFor(room, p.id));
-  });
-}
-
-function randomRoomId() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  let s = "";
-  for (let i = 0; i < 4; i++) {
-    s += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return s;
-}
-
-function ensureDrawPile(room) {
-  if (room.drawPile.length > 0) return;
-  if (room.discardPile.length <= 1) return;
-  
-  const top = room.discardPile.pop();
-  let pile = room.discardPile;
-  room.discardPile = [top];
-  
-  for (let i = pile.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pile[i], pile[j]] = [pile[j], pile[i]];
-  }
-  room.drawPile = pile;
-  room.log.push("🔄 Deck reshuffled");
-}
-
-function setTurnByIndex(room, index) {
-  if (!room.players.length) return;
-  const safeIndex = ((index % room.players.length) + room.players.length) % room.players.length;
-  room.currentIndex = safeIndex;
-  room.turnId = room.players[safeIndex].id;
-  room.players.forEach((p) => (p.hasDrawn = false));
-}
-
-function advanceTurn(room) {
-  if (!room.players.length) return;
-  
-  let idx = room.players.findIndex((p) => p.id === room.turnId);
-  if (idx === -1) idx = 0;
-
-  let steps = 1;
-  if (room.pendingSkips > 0) {
-    steps += room.pendingSkips;
-    room.pendingSkips = 0;
-    room.log.push(`⏭️ Skipped ${steps-1} turn(s)`);
-  }
-
-  const nextIndex = (idx + steps) % room.players.length;
-  room.log.push(`Turn → ${room.players[nextIndex].name}`);
-  setTurnByIndex(room, nextIndex);
-}
-
-function startRound(room) {
-  room.drawPile = createDeck();
-  room.discardPile = [];
-  room.pendingDraw = 0;
-  room.pendingSkips = 0;
-  room.closeCalled = false;
-  room.started = true;
-
-  room.players.forEach((p) => {
-    p.hand = [];
-    p.hasDrawn = false;
-    p.score = 0;
-  });
-
-  setTurnByIndex(room, 0);
-
-  // ✅ 7 CARDS DEALING
-  for (let i = 0; i < START_CARDS; i++) {  // START_CARDS = 7
-    room.players.forEach((p) => {
-      ensureDrawPile(room);
-      const card = room.drawPile.pop();
-      if (card) p.hand.push(card);
-    });
-  }
-
-  ensureDrawPile(room);
-  const firstCard = room.drawPile.pop();
-  if (firstCard) {
-    room.discardPile.push(firstCard);
-    room.log.push(`🎴 Round started! Open: ${firstCard.rank}`);
+  // ✅ PERFECT CLOSE SCORING
+  s.on("action_close",d=>{
+    let rId=d?.roomId;if(!rId||!rooms.has(rId))return;
+    let r=rooms.get(rId);if(!r.started||r.closeCalled||s.id!==r.turnId)return;
+    r.closeCalled=true;
     
-    if (firstCard.rank === "7") {
-      room.pendingDraw = 2;
-      room.log.push("7 → Next draws 2");
-    }
-    if (firstCard.rank === "J") {
-      room.pendingSkips = 1;
-      room.log.push("J → Next skipped");
-    }
-  }
-
-  broadcast(room);
-}
-
-io.on("connection", (socket) => {
-  console.log(`🔌 ${socket.id} connected`);
-
-  socket.on("create_room", (data, cb) => {
-    console.log("🎮 CREATE:", data);
-    const name = (data?.name || "Player").trim().substring(0, 15) || "Player";
+    let closer=r.players.find(p=>p.id===s.id);
+    let closerPts=closer?closer.hand.reduce((s,c)=>s+c.value,0):0;
     
-    let roomId;
-    do { roomId = randomRoomId(); } while (rooms.has(roomId));
-
-    const room = {
-      roomId, 
-      hostId: socket.id, 
-      players: [{
-        id: socket.id, name, score: 0, hand: [], hasDrawn: false
-      }], 
-      started: false, 
-      drawPile: [], 
-      discardPile: [], 
-      currentIndex: 0,
-      turnId: socket.id, 
-      pendingDraw: 0, 
-      pendingSkips: 0, 
-      closeCalled: false, 
-      log: []
-    };
-
-    rooms.set(roomId, room);
-    socket.join(roomId);
-    room.log.push(`${name} created room`);
-    console.log(`✅ Room ${roomId} created by ${name}`);
-    
-    cb({ roomId, success: true });
-    broadcast(room);
-  });
-
-  socket.on("join_room", (data, cb) => {
-    console.log("🚪 JOIN:", data);
-    const roomId = (data?.roomId || "").trim().toUpperCase();
-    const name = (data?.name || "Player").trim().substring(0, 15) || "Player";
-
-    if (!roomId) return cb({ error: "Room ID missing" });
-    if (!rooms.has(roomId)) return cb({ error: `Room ${roomId} not found` });
-
-    const room = rooms.get(roomId);
-    if (room.players.length >= MAX_PLAYERS) return cb({ error: "Room full" });
-    if (room.started) return cb({ error: "Game started" });
-
-    room.players.push({ id: socket.id, name, score: 0, hand: [], hasDrawn: false });
-    socket.join(roomId);
-    room.log.push(`${name} joined (${room.players.length}/${MAX_PLAYERS})`);
-    
-    console.log(`✅ ${name} joined ${roomId}`);
-    cb({ roomId, success: true });
-    broadcast(room);
-  });
-
-  socket.on("start_round", (data) => {
-    const roomId = data?.roomId;
-    if (!roomId || !rooms.has(roomId)) return;
-    
-    const room = rooms.get(roomId);
-    if (room.hostId !== socket.id || room.players.length < 2) return;
-    
-    console.log(`▶️ ${socket.id} starting round ${roomId}`);
-    startRound(room);
-  });
-
-  socket.on("action_draw", (data) => {
-    const roomId = data?.roomId;
-    if (!roomId || !rooms.has(roomId)) return;
-    
-    const room = rooms.get(roomId);
-    if (!room.started || room.closeCalled || socket.id !== room.turnId) return;
-    
-    const player = room.players.find(p => p.id === socket.id);
-    if (!player || player.hasDrawn) return;
-
-    let drawCount = room.pendingDraw > 0 ? room.pendingDraw : 1;
-    const fromDiscard = data?.fromDiscard || false;
-    
-    for (let i = 0; i < drawCount; i++) {
-      let card;
-      if (fromDiscard && room.discardPile.length > 0) {
-        card = room.discardPile.pop();
-      } else {
-        ensureDrawPile(room);
-        card = room.drawPile.pop();
+    r.players.forEach(p=>{
+      let pts=p.hand.reduce((s,c)=>s+c.value,0);
+      if(p.id===s.id || ptsloserPts){
+        p.score=0; // CLOSE player or LOWER → 0
+      }else{
+        p.score=pts*2; // HIGHER → DOUBLE
       }
-      if (card) player.hand.push(card);
-    }
-
-    player.hasDrawn = true;
-    room.pendingDraw = 0;
-    room.log.push(`${player.name} drew ${drawCount} card(s)`);
-    broadcast(room);
-  });
-
-  socket.on("action_drop", (data) => {
-    const roomId = data?.roomId;
-    if (!roomId || !rooms.has(roomId)) return;
-
-    const room = rooms.get(roomId);
-    if (!room.started || room.closeCalled || socket.id !== room.turnId) return;
-    
-    const player = room.players.find(p => p.id === socket.id);
-    const ids = data?.selectedIds || [];
-    const selected = player.hand.filter(c => ids.includes(c.id));
-
-    if (selected.length === 0) return;
-
-    const uniqueRanks = [...new Set(selected.map(c => c.rank))];
-    if (uniqueRanks.length !== 1) return;
-
-    const openCard = room.discardPile[room.discardPile.length - 1];
-    const canDropWithoutDraw = openCard && uniqueRanks[0] === openCard.rank;
-    
-    if (!player.hasDrawn && !canDropWithoutDraw) return;
-
-    player.hand = player.hand.filter(c => !ids.includes(c.id));
-    selected.forEach(c => room.discardPile.push(c));
-
-    const rank = uniqueRanks[0];
-    if (rank === "J") {
-      room.pendingSkips += selected.length;
-      room.log.push(`${player.name} dropped ${selected.length}J → ${selected.length} skip(s)`);
-    } else if (rank === "7") {
-      room.pendingDraw += 2 * selected.length;
-      room.log.push(`${player.name} dropped ${selected.length}7 → +${2*selected.length} draw`);
-    } else {
-      room.log.push(`${player.name} dropped ${selected.length} ${rank}`);
-    }
-
-    player.hasDrawn = false;
-    advanceTurn(room);
-    broadcast(room);
-  });
-
-  socket.on("action_close", (data) => {
-    const roomId = data?.roomId;
-    if (!roomId || !rooms.has(roomId)) return;
-
-    const room = rooms.get(roomId);
-    if (!room.started || room.closeCalled || socket.id !== room.turnId) return;
-
-    room.closeCalled = true;
-    room.players.forEach(p => {
-      p.score += p.hand.reduce((sum, c) => sum + c.value, 0);
     });
-    room.log.push(`${room.players.find(p => p.id === socket.id)?.name} called CLOSE`);
-    broadcast(room);
+    
+    r.log.push(`🏁 CLOSE: ${closerPts}pts threshold`);
+    broadcast(r);
   });
-
-  socket.on("disconnect", () => {
-    console.log(`🔌 ${socket.id} disconnected`);
-    for (const [roomId, room] of rooms.entries()) {
-      if (room.players.some(p => p.id === socket.id)) {
-        room.players = room.players.filter(p => p.id !== socket.id);
-        room.log.push("Player left");
-
-        if (room.players.length === 0) {
-          rooms.delete(roomId);
-          break;
-        }
-        
-        if (room.hostId === socket.id) {
-          room.hostId = room.players[0]?.id;
-        }
-        
-        if (!room.players.some(p => p.id === room.turnId)) {
-          setTurnByIndex(room, 0);
-        }
-        
-        broadcast(room);
-        break;
+  
+  s.on("disconnect",()=>{
+    for(let[rid,r]of rooms){
+      if(r.players.some(p=>p.id===s.id)){
+        r.players=r.players.filter(p=>p.id!==s.id);
+        if(r.players.length===0){rooms.delete(rid);break;}
+        if(r.hostId===s.id)r.hostId=r.players[0]?.id;
+        if(!r.players.some(p=>p.id===r.turnId))setTurnByIndex(r,0);
+        broadcast(r);break;
       }
     }
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Close Master Server on port ${PORT} - 7 CARDS ✅`);
-});
+server.listen(process.env.PORT||3000,()=>console.log("🚀 Close Master Server - Perfect Scoring ✅"));
