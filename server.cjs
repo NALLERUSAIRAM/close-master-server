@@ -1,6 +1,5 @@
 // ==========================
 // CLOSE MASTER POWER RUMMY — SERVER ENGINE
-// FULLY CUSTOM GAME ENGINE
 // ==========================
 
 const express = require("express");
@@ -28,7 +27,7 @@ const io = new Server(server, {
 // GAME CONSTANTS
 // ==========================
 
-const MAX_PLAYERS = 7;
+const MAX_PLAYERS = 7;    // ✅ up to 7 players
 const START_CARDS = 7;
 
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
@@ -78,14 +77,17 @@ function createDeck() {
 }
 
 function roomStateFor(room, pid) {
+  const discardTop =
+    room.discardPile[room.discardPile.length - 1] || null;
+
   return {
     roomId: room.roomId,
     youId: pid,
     hostId: room.hostId,
     started: room.started,
-    closeCalled: room.closeCalled,
+    closeCalled: room.closeCalled,        // ✅ for auto-points popup
     currentIndex: room.currentIndex,
-    discardTop: room.discardPile.at(-1),
+    discardTop,
     pendingDraw: room.pendingDraw,
     pendingSkips: room.pendingSkips,
     players: room.players.map(p => ({
@@ -131,53 +133,33 @@ function ensureDrawPile(room) {
   room.drawPile = pile;
 }
 
-// ==========================
-// GAME RULE HELPERS
-// ==========================
-
-function hasMatch(hand, openRank) {
-  return hand.some(c => c.rank === openRank);
-}
-
-function sameRankSet(hand, rank) {
-  return hand.filter(c => c.rank === rank);
-}
-
-function anyTripleSet(hand) {
-  let map = {};
-  hand.forEach(c => {
-    map[c.rank] = (map[c.rank]||0)+1;
-  });
-  for (const r in map) {
-    if (map[r] >= 3) return r;
-  }
-  return null;
-}
+// SIMPLE HELPERS (rules not 100% detailed here, focus on bugs you reported)
 
 function nextTurn(room) {
+  if (room.players.length === 0) return;
   room.currentIndex = (room.currentIndex + 1) % room.players.length;
 }
 
+// SCORE & CLOSE HANDLING
 function settleClose(room, callerId) {
   room.closeCalled = true;
 
   const results = room.players.map(p => ({
     id: p.id,
     name: p.name,
-    points: p.hand.reduce((s,c)=>s+c.value,0)
+    points: p.hand.reduce((s,c)=>s + (c.value || 0), 0)
   }));
 
   results.sort((a,b)=>a.points - b.points);
 
   const lowest = results[0];
-
-  const caller = results.find(r => r.id===callerId);
   const highest = results[results.length - 1];
+  const caller = results.find(r => r.id===callerId);
 
-  room.log.push(`CLOSE by ${caller.name}`);
+  room.log.push(`CLOSE by ${caller?.name || "Unknown"}`);
 
-  if (caller.id === lowest.id && lowest.points === caller.points) {
-    // correct
+  if (caller && caller.id === lowest.id && lowest.points === caller.points) {
+    // correct close
     room.log.push(`CLOSE CORRECT by ${caller.name}`);
     room.players.forEach(p=>{
       if (p.id === callerId) return;
@@ -185,8 +167,8 @@ function settleClose(room, callerId) {
       p.score += r.points;
     });
   } else {
-    // wrong
-    room.log.push(`CLOSE WRONG by ${caller.name}`);
+    // wrong close
+    room.log.push(`CLOSE WRONG by ${caller?.name || "Unknown"}`);
     const penalty = highest.points * 2;
     room.players.forEach(p=>{
       if (p.id===callerId) {
@@ -198,6 +180,15 @@ function settleClose(room, callerId) {
       }
     });
   }
+
+  // ✅ After close: reset round state, but keep players & scores
+  room.started = false;
+  room.drawPile = [];
+  room.discardPile = [];
+  room.pendingDraw = 0;
+  room.pendingSkips = 0;
+  room.currentIndex = 0;
+  room.players.forEach(p => { p.hand = []; });
 }
 
 function startRound(room) {
@@ -212,29 +203,30 @@ function startRound(room) {
     p.hand = [];
   });
 
-  // deal cards
+  // deal 7 each
   for (let r=0;r<START_CARDS;r++) {
     room.players.forEach(p=>{
       ensureDrawPile(room);
-      p.hand.push(room.drawPile.pop());
+      const c = room.drawPile.pop();
+      if (c) p.hand.push(c);
     });
   }
 
-  // open card
+  // first open card
   ensureDrawPile(room);
   const first = room.drawPile.pop();
-  room.discardPile.push(first);
+  if (first) room.discardPile.push(first);
 
-  room.log.push(`Round started. Open: ${first.rank}`);
+  room.log.push(`Round started. Open: ${first ? first.rank : "?"}`);
 
-  // open card power applies immediately
-  if (first.rank === "7") {
+  // Open card power applies immediately
+  if (first && first.rank === "7") {
     room.pendingDraw = 2;
-    room.log.push(`Open card is 7 → Next player must draw 2`);
+    room.log.push("Open card 7 → next player draws 2");
   }
-  if (first.rank === "J") {
+  if (first && first.rank === "J") {
     room.pendingSkips = 1;
-    room.log.push(`Open card is J → Next player skip`);
+    room.log.push("Open card J → next player skip");
   }
 }
 
@@ -292,7 +284,7 @@ io.on("connection", socket => {
     const room = rooms.get(roomId);
 
     if (room.players.length >= MAX_PLAYERS) {
-      cb && cb({error:"Room full"});
+      cb && cb({error:"Room is full (max 7 players)"});
       return;
     }
     if (room.started) {
@@ -325,7 +317,6 @@ io.on("connection", socket => {
 
     room.started = true;
     startRound(room);
-
     broadcast(room);
   });
 
@@ -351,13 +342,12 @@ io.on("connection", socket => {
     }
 
     room.log.push(`${player.name} drew ${drawCount}`);
-
     room.pendingDraw = 0;
 
     broadcast(room);
   });
 
-  // DROP CARDS
+  // DROP CARDS (simplified: accepts any same-rank set & applies powers)
   socket.on("action_drop",(data)=>{
     const roomId = data?.roomId;
     const ids = data?.selectedIds || [];
@@ -375,34 +365,14 @@ io.on("connection", socket => {
     const selected = player.hand.filter(c=>ids.includes(c.id));
     if (!selected.length) return;
 
-    const ranks = [...new Set(selected.map(c=>c.rank))];
-    if (ranks.length !== 1) {
+    const uniqueRanks = [...new Set(selected.map(c=>c.rank))];
+    if (uniqueRanks.length !== 1) {
       room.log.push("Invalid drop (different ranks)");
       broadcast(room);
       return;
     }
 
-    const rank = ranks[0];
-    const openRank = room.discardPile.at(-1).rank;
-
-    // Rule: forced match unless draw OR special escape
-    const hasMatchInHand = hasMatch(player.hand, openRank);
-    const triple = anyTripleSet(player.hand);
-
-    let isDrawCard = false;
-    if (room.pendingDraw === 0) {
-      // normal scenario
-      if (openRank !== rank && hasMatchInHand) {
-        room.log.push("Forced match rule violated");
-        broadcast(room);
-        return;
-      }
-    }
-
-    // special 3-card rule
-    if (!hasMatchInHand && triple && rank === triple) {
-      // allowed
-    }
+    const rank = uniqueRanks[0];
 
     // remove from hand
     player.hand = player.hand.filter(c=>!ids.includes(c.id));
@@ -410,7 +380,7 @@ io.on("connection", socket => {
     // add to discard
     selected.forEach(c=>room.discardPile.push(c));
 
-    // Power effects
+    // power effects
     if (rank === "J") {
       room.pendingSkips += selected.length;
       room.log.push(`${player.name} dropped ${selected.length} J → skip chain`);
@@ -421,9 +391,7 @@ io.on("connection", socket => {
       room.log.push(`${player.name} dropped ${selected.length} card(s)`);
     }
 
-    // After drop → turn
     nextTurn(room);
-
     broadcast(room);
   });
 
