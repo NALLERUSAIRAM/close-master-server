@@ -27,7 +27,7 @@ const io = new Server(server, {
 // GAME CONSTANTS
 // ==========================
 
-const MAX_PLAYERS = 7;    // ✅ up to 7 players
+const MAX_PLAYERS = 7;
 const START_CARDS = 7;
 
 const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
@@ -39,8 +39,8 @@ function cardValue(rank) {
   if (rank === "A") return 1;
   if (rank === "JOKER") return 0;
   if (["J","Q","K"].includes(rank)) return 10;
-  const n = parseInt(rank);
-  return isNaN(n) ? 0 : n;
+  const n = parseInt(rank, 10);
+  return Number.isNaN(n) ? 0 : n;
 }
 
 function createDeck() {
@@ -58,18 +58,18 @@ function createDeck() {
   }
 
   // 2 Jokers
-  for (let i=0;i<2;i++) {
+  for (let i = 0; i < 2; i++) {
     deck.push({
       id: globalCardId++,
       suit: null,
       rank: "JOKER",
-      value: 0
+      value: 0,
     });
   }
 
-  // Shuffle
-  for (let i = deck.length-1; i >= 0; i--) {
-    const j = Math.floor(Math.random() * (i+1));
+  // shuffle
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
 
@@ -85,24 +85,24 @@ function roomStateFor(room, pid) {
     youId: pid,
     hostId: room.hostId,
     started: room.started,
-    closeCalled: room.closeCalled,        // ✅ for auto-points popup
+    closeCalled: room.closeCalled,
     currentIndex: room.currentIndex,
     discardTop,
     pendingDraw: room.pendingDraw,
     pendingSkips: room.pendingSkips,
-    players: room.players.map(p => ({
+    players: room.players.map((p) => ({
       id: p.id,
       name: p.name,
       score: p.score,
-      hand: p.id===pid ? p.hand : [],
-      handSize: p.hand.length
+      hand: p.id === pid ? p.hand : [],
+      handSize: p.hand.length,
     })),
-    log: room.log.slice(-80)
+    log: room.log.slice(-80),
   };
 }
 
 function broadcast(room) {
-  room.players.forEach(p => {
+  room.players.forEach((p) => {
     io.to(p.id).emit("game_state", roomStateFor(room, p.id));
   });
 }
@@ -110,7 +110,9 @@ function broadcast(room) {
 function randomRoomId() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ";
   let s = "";
-  for (let i=0;i<4;i++) s += chars[Math.floor(Math.random()*chars.length)];
+  for (let i = 0; i < 4; i++) {
+    s += chars[Math.floor(Math.random() * chars.length)];
+  }
   return s;
 }
 
@@ -125,87 +127,105 @@ function ensureDrawPile(room) {
   let pile = room.discardPile;
   room.discardPile = [top];
 
-  // shuffle
-  for (let i = pile.length-1; i >= 0; i--) {
-    const j = Math.floor(Math.random()*(i+1));
-    [pile[i],pile[j]]=[pile[j],pile[i]];
+  // shuffle discard (except top) back into draw
+  for (let i = pile.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pile[i], pile[j]] = [pile[j], pile[i]];
   }
   room.drawPile = pile;
 }
 
-// SIMPLE HELPERS (rules not 100% detailed here, focus on bugs you reported)
-
-function nextTurn(room) {
+// TURN ROTATION – always clockwise, applies skip chain
+function advanceTurn(room) {
   if (room.players.length === 0) return;
-  room.currentIndex = (room.currentIndex + 1) % room.players.length;
+
+  let steps = 1;
+  if (room.pendingSkips > 0) {
+    steps += room.pendingSkips;
+    room.pendingSkips = 0;
+  }
+
+  room.currentIndex =
+    (room.currentIndex + steps) % room.players.length;
 }
 
 // SCORE & CLOSE HANDLING
 function settleClose(room, callerId) {
   room.closeCalled = true;
 
-  const results = room.players.map(p => ({
+  const results = room.players.map((p) => ({
     id: p.id,
     name: p.name,
-    points: p.hand.reduce((s,c)=>s + (c.value || 0), 0)
+    points: p.hand.reduce(
+      (s, c) => s + (c.value || 0),
+      0
+    ),
   }));
 
-  results.sort((a,b)=>a.points - b.points);
+  results.sort((a, b) => a.points - b.points);
 
   const lowest = results[0];
   const highest = results[results.length - 1];
-  const caller = results.find(r => r.id===callerId);
+  const caller = results.find((r) => r.id === callerId);
 
   room.log.push(`CLOSE by ${caller?.name || "Unknown"}`);
 
-  if (caller && caller.id === lowest.id && lowest.points === caller.points) {
-    // correct close
+  if (
+    caller &&
+    caller.id === lowest.id &&
+    lowest.points === caller.points
+  ) {
+    // CLOSE correct
     room.log.push(`CLOSE CORRECT by ${caller.name}`);
-    room.players.forEach(p=>{
+    room.players.forEach((p) => {
       if (p.id === callerId) return;
-      const r = results.find(x => x.id===p.id);
+      const r = results.find((x) => x.id === p.id);
       p.score += r.points;
     });
   } else {
-    // wrong close
+    // CLOSE wrong
     room.log.push(`CLOSE WRONG by ${caller?.name || "Unknown"}`);
     const penalty = highest.points * 2;
-    room.players.forEach(p=>{
-      if (p.id===callerId) {
+    room.players.forEach((p) => {
+      if (p.id === callerId) {
         p.score += penalty;
       } else {
-        const r = results.find(x=>x.id===p.id);
-        if (r.id===lowest.id) return;
+        const r = results.find((x) => x.id === p.id);
+        if (r.id === lowest.id) return;
         p.score += r.points;
       }
     });
   }
 
-  // ✅ After close: reset round state, but keep players & scores
+  // 🟢 ROUND RESET (players & scores stay, hands + piles clear)
   room.started = false;
   room.drawPile = [];
   room.discardPile = [];
   room.pendingDraw = 0;
   room.pendingSkips = 0;
   room.currentIndex = 0;
-  room.players.forEach(p => { p.hand = []; });
+  room.players.forEach((p) => {
+    p.hand = [];
+  });
 }
 
 function startRound(room) {
   room.drawPile = createDeck();
   room.discardPile = [];
-  room.currentIndex = Math.floor(Math.random()*room.players.length);
   room.pendingDraw = 0;
   room.pendingSkips = 0;
   room.closeCalled = false;
 
-  room.players.forEach(p=>{
+  // 🟢 Host always starts – index 0
+  room.currentIndex = 0;
+
+  room.players.forEach((p) => {
     p.hand = [];
   });
 
   // deal 7 each
-  for (let r=0;r<START_CARDS;r++) {
-    room.players.forEach(p=>{
+  for (let r = 0; r < START_CARDS; r++) {
+    room.players.forEach((p) => {
       ensureDrawPile(room);
       const c = room.drawPile.pop();
       if (c) p.hand.push(c);
@@ -217,7 +237,9 @@ function startRound(room) {
   const first = room.drawPile.pop();
   if (first) room.discardPile.push(first);
 
-  room.log.push(`Round started. Open: ${first ? first.rank : "?"}`);
+  room.log.push(
+    `Round started. Open: ${first ? first.rank : "?"}`
+  );
 
   // Open card power applies immediately
   if (first && first.rank === "7") {
@@ -234,10 +256,9 @@ function startRound(room) {
 // SOCKET HANDLERS
 // ==========================
 
-io.on("connection", socket => {
-
+io.on("connection", (socket) => {
   // CREATE ROOM
-  socket.on("create_room",(data,cb)=>{
+  socket.on("create_room", (data, cb) => {
     const name = data?.name || "Player";
 
     let id;
@@ -248,12 +269,14 @@ io.on("connection", socket => {
     const room = {
       roomId: id,
       hostId: socket.id,
-      players: [{
-        id: socket.id,
-        name,
-        score: 0,
-        hand: []
-      }],
+      players: [
+        {
+          id: socket.id,
+          name,
+          score: 0,
+          hand: [],
+        },
+      ],
       started: false,
       drawPile: [],
       discardPile: [],
@@ -261,34 +284,34 @@ io.on("connection", socket => {
       pendingDraw: 0,
       pendingSkips: 0,
       closeCalled: false,
-      log: []
+      log: [],
     };
 
-    rooms.set(id,room);
+    rooms.set(id, room);
     socket.join(id);
     room.log.push(`${name} created room ${id}`);
 
-    cb && cb({roomId:id});
+    cb && cb({ roomId: id });
     broadcast(room);
   });
 
   // JOIN ROOM
-  socket.on("join_room",(data,cb)=>{
+  socket.on("join_room", (data, cb) => {
     const roomId = data?.roomId;
     const name = data?.name || "Player";
 
     if (!roomId || !rooms.has(roomId)) {
-      cb && cb({error:"Room not found"});
+      cb && cb({ error: "Room not found" });
       return;
     }
     const room = rooms.get(roomId);
 
     if (room.players.length >= MAX_PLAYERS) {
-      cb && cb({error:"Room is full (max 7 players)"});
+      cb && cb({ error: "Room is full (max 7 players)" });
       return;
     }
     if (room.started) {
-      cb && cb({error:"Game already started"});
+      cb && cb({ error: "Game already started" });
       return;
     }
 
@@ -296,20 +319,20 @@ io.on("connection", socket => {
       id: socket.id,
       name,
       score: 0,
-      hand: []
+      hand: [],
     });
     socket.join(roomId);
 
     room.log.push(`${name} joined`);
-    cb && cb({roomId});
+    cb && cb({ roomId });
 
     broadcast(room);
   });
 
   // START ROUND (only host)
-  socket.on("start_round",(data)=>{
+  socket.on("start_round", (data) => {
     const roomId = data?.roomId;
-    if (!rooms.has(roomId)) return;
+    if (!roomId || !rooms.has(roomId)) return;
     const room = rooms.get(roomId);
 
     if (room.hostId !== socket.id) return;
@@ -321,53 +344,68 @@ io.on("connection", socket => {
   });
 
   // DRAW CARD
-  socket.on("action_draw",(data)=>{
+  socket.on("action_draw", (data) => {
     const roomId = data?.roomId;
-    if (!rooms.has(roomId)) return;
+    if (!roomId || !rooms.has(roomId)) return;
     const room = rooms.get(roomId);
 
     if (!room.started || room.closeCalled) return;
 
-    const idx = room.players.findIndex(p=>p.id===socket.id);
-    if (idx !== room.currentIndex) return; // not turn
+    const idx = room.players.findIndex(
+      (p) => p.id === socket.id
+    );
+    if (idx === -1) return;
+    if (idx !== room.currentIndex) return; // not your turn
 
     const player = room.players[idx];
 
-    let drawCount = room.pendingDraw > 0 ? room.pendingDraw : 1;
+    let drawCount =
+      room.pendingDraw > 0 ? room.pendingDraw : 1;
 
-    for (let i=0;i<drawCount;i++) {
+    for (let i = 0; i < drawCount; i++) {
       ensureDrawPile(room);
       const c = room.drawPile.pop();
       if (c) player.hand.push(c);
     }
 
-    room.log.push(`${player.name} drew ${drawCount}`);
+    room.log.push(
+      `${player.name} drew ${drawCount} card(s)`
+    );
     room.pendingDraw = 0;
 
     broadcast(room);
   });
 
-  // DROP CARDS (simplified: accepts any same-rank set & applies powers)
-  socket.on("action_drop",(data)=>{
+  // DROP CARDS
+  socket.on("action_drop", (data) => {
     const roomId = data?.roomId;
     const ids = data?.selectedIds || [];
 
-    if (!rooms.has(roomId)) return;
+    if (!roomId || !rooms.has(roomId)) return;
     const room = rooms.get(roomId);
     if (!room.started || room.closeCalled) return;
 
-    const idx = room.players.findIndex(p=>p.id===socket.id);
-    if (idx !== room.currentIndex) return;
+    const idx = room.players.findIndex(
+      (p) => p.id === socket.id
+    );
+    if (idx === -1) return;
+    if (idx !== room.currentIndex) return; // not your turn
 
     const player = room.players[idx];
     if (!ids.length) return;
 
-    const selected = player.hand.filter(c=>ids.includes(c.id));
+    const selected = player.hand.filter((c) =>
+      ids.includes(c.id)
+    );
     if (!selected.length) return;
 
-    const uniqueRanks = [...new Set(selected.map(c=>c.rank))];
+    const uniqueRanks = [
+      ...new Set(selected.map((c) => c.rank)),
+    ];
     if (uniqueRanks.length !== 1) {
-      room.log.push("Invalid drop (different ranks)");
+      room.log.push(
+        `${player.name} invalid drop (different ranks)`
+      );
       broadcast(room);
       return;
     }
@@ -375,35 +413,48 @@ io.on("connection", socket => {
     const rank = uniqueRanks[0];
 
     // remove from hand
-    player.hand = player.hand.filter(c=>!ids.includes(c.id));
+    player.hand = player.hand.filter(
+      (c) => !ids.includes(c.id)
+    );
 
     // add to discard
-    selected.forEach(c=>room.discardPile.push(c));
+    selected.forEach((c) => room.discardPile.push(c));
 
     // power effects
     if (rank === "J") {
       room.pendingSkips += selected.length;
-      room.log.push(`${player.name} dropped ${selected.length} J → skip chain`);
+      room.log.push(
+        `${player.name} dropped ${selected.length} J → skip +${selected.length}`
+      );
     } else if (rank === "7") {
       room.pendingDraw += 2 * selected.length;
-      room.log.push(`${player.name} dropped ${selected.length} 7 → draw chain +${2*selected.length}`);
+      room.log.push(
+        `${player.name} dropped ${selected.length} 7 → draw +${
+          2 * selected.length
+        }`
+      );
     } else {
-      room.log.push(`${player.name} dropped ${selected.length} card(s)`);
+      room.log.push(
+        `${player.name} dropped ${selected.length} card(s)`
+      );
     }
 
-    nextTurn(room);
+    advanceTurn(room);
     broadcast(room);
   });
 
   // CLOSE
-  socket.on("action_close",(data)=>{
+  socket.on("action_close", (data) => {
     const roomId = data?.roomId;
-    if (!rooms.has(roomId)) return;
+    if (!roomId || !rooms.has(roomId)) return;
     const room = rooms.get(roomId);
 
     if (!room.started || room.closeCalled) return;
 
-    const idx = room.players.findIndex(p=>p.id===socket.id);
+    const idx = room.players.findIndex(
+      (p) => p.id === socket.id
+    );
+    if (idx === -1) return;
     if (idx !== room.currentIndex) return;
 
     settleClose(room, socket.id);
@@ -411,17 +462,19 @@ io.on("connection", socket => {
   });
 
   // DISCONNECT
-  socket.on("disconnect",()=>{
-    let roomFound=null;
+  socket.on("disconnect", () => {
+    let roomFound = null;
     for (const room of rooms.values()) {
-      if (room.players.some(p=>p.id===socket.id)) {
-        roomFound=room;
+      if (room.players.some((p) => p.id === socket.id)) {
+        roomFound = room;
         break;
       }
     }
     if (!roomFound) return;
 
-    roomFound.players = roomFound.players.filter(p=>p.id!==socket.id);
+    roomFound.players = roomFound.players.filter(
+      (p) => p.id !== socket.id
+    );
     roomFound.log.push("Player disconnected");
 
     if (roomFound.players.length === 0) {
@@ -431,11 +484,14 @@ io.on("connection", socket => {
 
     if (roomFound.hostId === socket.id) {
       roomFound.hostId = roomFound.players[0].id;
-      roomFound.log.push(`${roomFound.players[0].name} is new host`);
+      roomFound.log.push(
+        `${roomFound.players[0].name} is new host`
+      );
     }
 
-    if (roomFound.currentIndex >= roomFound.players.length)
+    if (roomFound.currentIndex >= roomFound.players.length) {
       roomFound.currentIndex = 0;
+    }
 
     broadcast(roomFound);
   });
@@ -443,6 +499,6 @@ io.on("connection", socket => {
 
 // ==========================
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, ()=>{
-  console.log("POWER Rummy Server running on",PORT);
+server.listen(PORT, () => {
+  console.log("POWER Rummy Server running on", PORT);
 });
