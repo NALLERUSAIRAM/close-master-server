@@ -1,5 +1,5 @@
 // ==========================
-// CLOSE MASTER POWER RUMMY — SERVER ENGINE (NEW RULES ADDED)
+// CLOSE MASTER POWER RUMMY — COMPLETE FIXED SERVER (DRAW → DROP → NEXT)
 // ==========================
 
 const express = require("express");
@@ -11,7 +11,7 @@ const app = express();
 app.use(cors());
 
 app.get("/", (req, res) => {
-  res.send("Close Master POWER RUMMY Server Running ✅ - NEW RULES");
+  res.send("Close Master POWER RUMMY Server ✅ - DRAW DROP FIXED");
 });
 
 const server = http.createServer(app);
@@ -65,7 +65,7 @@ function createDeck() {
   }
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
+    [deck[i], deck[j] = [deck[j], deck[i]];
   }
   return deck;
 }
@@ -82,14 +82,14 @@ function roomStateFor(room, pid) {
     discardTop,
     pendingDraw: room.pendingDraw,
     pendingSkips: room.pendingSkips,
-    hasDrawn: room.players.find(p => p.id === pid)?.hasDrawn || false, // ✅ NEW: Track draw status
+    hasDrawn: room.players.find(p => p.id === pid)?.hasDrawn || false,
     players: room.players.map((p) => ({
       id: p.id,
       name: p.name,
       score: p.score,
       hand: p.id === pid ? p.hand : [],
       handSize: p.hand.length,
-      hasDrawn: p.hasDrawn, // ✅ NEW: Show if player drew this turn
+      hasDrawn: p.hasDrawn,
     })),
     log: room.log.slice(-80),
   };
@@ -130,10 +130,7 @@ function setTurnByIndex(room, index) {
   const safeIndex = ((index % room.players.length) + room.players.length) % room.players.length;
   room.currentIndex = safeIndex;
   room.turnId = room.players[safeIndex].id;
-  
-  // ✅ NEW: Reset hasDrawn for new turn player
   room.players.forEach(p => p.hasDrawn = false);
-  room.players[safeIndex].hasDrawn = false;
 }
 
 function advanceTurn(room) {
@@ -154,7 +151,6 @@ function advanceTurn(room) {
 
   const nextIndex = (idx + steps) % room.players.length;
   room.log.push(`Turn: ${room.players[idx].name} → ${room.players[nextIndex].name}`);
-  
   setTurnByIndex(room, nextIndex);
 }
 
@@ -209,7 +205,7 @@ function settleClose(room, callerId) {
   room.turnId = room.players[0].id;
   room.players.forEach((p) => {
     p.hand = [];
-    p.hasDrawn = false; // ✅ NEW: Reset hasDrawn
+    p.hasDrawn = false;
   });
 }
 
@@ -222,7 +218,7 @@ function startRound(room) {
 
   room.players.forEach((p) => {
     p.hand = [];
-    p.hasDrawn = false; // ✅ NEW: Initialize hasDrawn
+    p.hasDrawn = false;
   });
   setTurnByIndex(room, 0);
 
@@ -251,14 +247,14 @@ function startRound(room) {
 }
 
 // ==========================
-// SOCKET HANDLERS (NEW RULES IMPLEMENTED)
+// SOCKET HANDLERS (COMPLETE FIXED)
 // ==========================
 
 io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
 
   socket.on("create_room", (data, cb) => {
-    console.log("CREATE ROOM data:", data);
+    console.log("CREATE ROOM:", data);
     const name = data?.name?.trim() || "Player";
 
     let id;
@@ -274,7 +270,7 @@ io.on("connection", (socket) => {
         name,
         score: 0,
         hand: [],
-        hasDrawn: false, // ✅ NEW: Track if drawn this turn
+        hasDrawn: false,
       }],
       started: false,
       drawPile: [],
@@ -290,19 +286,15 @@ io.on("connection", (socket) => {
     rooms.set(id, room);
     socket.join(id);
     room.log.push(`${name} created room ${id}`);
-    
     console.log(`✅ Room created: ${id}`);
     cb({ roomId: id, success: true });
     broadcast(room);
   });
 
   socket.on("join_room", (data, cb) => {
-    console.log("JOIN ROOM data:", data);
-    
+    console.log("JOIN ROOM:", data);
     const roomId = data?.roomId?.trim();
     const name = data?.name?.trim() || "Player";
-
-    console.log(`Join attempt: roomId="${roomId}"`);
 
     if (!roomId) {
       cb({ error: "Room ID missing" });
@@ -328,13 +320,12 @@ io.on("connection", (socket) => {
       name,
       score: 0,
       hand: [],
-      hasDrawn: false, // ✅ NEW: Track draw status
+      hasDrawn: false,
     });
     socket.join(roomId);
 
     room.log.push(`${name} joined (${room.players.length}/${MAX_PLAYERS})`);
     console.log(`✅ ${name} joined ${roomId}`);
-    
     cb({ roomId, success: true });
     broadcast(room);
   });
@@ -352,10 +343,10 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // ✅ NEW RULE 1 & 2: DRAW (Deck or Discard) - MUST DRAW BEFORE DROP
+  // ✅ FIXED: DRAW → STAY SAME TURN (wait for DROP)
   socket.on("action_draw", (data) => {
     const roomId = data?.roomId;
-    const fromDiscard = data?.fromDiscard || false; // ✅ NEW: Choose deck or discard
+    const fromDiscard = data?.fromDiscard || false;
     if (!roomId || !rooms.has(roomId)) return;
     const room = rooms.get(roomId);
 
@@ -368,34 +359,29 @@ io.on("connection", (socket) => {
       return;
     }
 
-    let card = null;
     let drawCount = room.pendingDraw > 0 ? room.pendingDraw : 1;
-
     for (let i = 0; i < drawCount; i++) {
+      let card = null;
       if (fromDiscard && room.discardPile.length > 0) {
-        // ✅ NEW: Draw from discard pile (open card)
         card = room.discardPile.pop();
+        room.log.push(`${player.name} drew ${card.rank} (discard)`);
       } else {
-        // Draw from deck
         ensureDrawPile(room);
         card = room.drawPile.pop();
+        room.log.push(`${player.name} drew ${card?.rank || "?"}`);
       }
-      
-      if (card) {
-        player.hand.push(card);
-        room.log.push(`${player.name} drew ${card.rank}${fromDiscard ? ' (discard)' : ''}`);
-      }
+      if (card) player.hand.push(card);
     }
 
-    player.hasDrawn = true; // ✅ NEW: Mark as drawn
+    player.hasDrawn = true;
     room.pendingDraw = 0;
+    room.log.push(`${player.name} ✓ Drew - now DROP!`);
     
-    // Advance turn after draw (no drop needed)
-    advanceTurn(room);
+    // ✅ NO advanceTurn - player must DROP next
     broadcast(room);
   });
 
-  // ✅ NEW RULE: DROP - Only after drawing this turn
+  // ✅ FIXED: DROP → THEN advance turn
   socket.on("action_drop", (data) => {
     const roomId = data?.roomId;
     const ids = data?.selectedIds || [];
@@ -427,17 +413,16 @@ io.on("connection", (socket) => {
 
     if (rank === "J") {
       room.pendingSkips += selected.length;
-      room.log.push(`${player.name} dropped ${selected.length}J (skip)`);
+      room.log.push(`${player.name} dropped ${selected.length}J → skip`);
     } else if (rank === "7") {
       room.pendingDraw += 2 * selected.length;
-      room.log.push(`${player.name} dropped ${selected.length}7 (draw)`);
+      room.log.push(`${player.name} dropped ${selected.length}7 → draw`);
     } else {
-      room.log.push(`${player.name} dropped ${selected.length} cards`);
+      room.log.push(`${player.name} dropped ${selected.length}`);
     }
 
-    // Reset hasDrawn after drop, advance turn
     player.hasDrawn = false;
-    advanceTurn(room);
+    advanceTurn(room); // ✅ TURN ADVANCES ONLY AFTER DROP
     broadcast(room);
   });
 
@@ -486,5 +471,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("🚀 POWER Rummy Server (NEW RULES) on port", PORT);
+  console.log("🚀 POWER Rummy Server (DRAW→DROP→NEXT) on port", PORT);
 });
