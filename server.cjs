@@ -1,4 +1,4 @@
-// server.js
+// server.js  (complete code – old file delete chesi idi full ga paste cheyyi)
 
 const express = require("express");
 const http = require("http");
@@ -194,6 +194,8 @@ io.on("connection", (socket) => {
   socket.on("join_room", (data, cb) => {
     const roomId = (data?.roomId || "").trim().toUpperCase();
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
+
+    console.log("JOIN REQ:", roomId, "from", name);
 
     if (!roomId) return cb?.({ error: "Room ID required" });
     if (!rooms.has(roomId)) return cb?.({ error: `Room ${roomId} not found` });
