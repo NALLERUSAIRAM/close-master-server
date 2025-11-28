@@ -1,3 +1,5 @@
+// server.js
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -10,14 +12,14 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 const MAX_PLAYERS = 7;
 const START_CARDS = 7;
-const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-const SUITS = ["♠", "♥", "♦", "♣"];
+const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+const SUITS = ["♠","♥","♦","♣"];
 let globalCardId = 1;
 
 function cardValue(r) {
   if (r === "A") return 1;
   if (r === "JOKER") return 0;
-  if (["J", "Q", "K"].includes(r)) return 10;
+  if (["J","Q","K"].includes(r)) return 10;
   return parseInt(r) || 0;
 }
 
@@ -257,9 +259,16 @@ io.on("connection", (socket) => {
     const ranks = [...new Set(selected.map((c) => c.rank))];
     if (ranks.length !== 1) return;
 
-    // Draw lekunda drop: minimum 3 same-rank cards
+    const openCard = room.discardPile[room.discardPile.length - 1];
+
+    // DRAW LEKUNDA DROP RULE:
+    // 1) Same rank as open card -> any count (1+)
+    // 2) Different rank -> must be at least 3 cards
     if (!player.hasDrawn) {
-      if (selected.length < 3) return;
+      const sameAsOpen = openCard && ranks[0] === openCard.rank;
+      if (!sameAsOpen && selected.length < 3) {
+        return;
+      }
     }
 
     player.hand = player.hand.filter((c) => !ids.includes(c.id));
