@@ -47,7 +47,7 @@ io.on("connection", (socket) => {
       currentPlayerId: socket.id,
       hasDrawn: false,
       started: false,
-      roundActive: false
+      roundActive: false,
     };
     rooms.set(roomId, room);
     socket.join(roomId);
@@ -57,7 +57,8 @@ io.on("connection", (socket) => {
   socket.on("join_room", ({ name, roomId }) => {
     const room = rooms.get(roomId);
     if (!room) return socket.emit("error", "Room not found");
-    if (room.players.length >= MAX_PLAYERS) return socket.emit("error", "Room full");
+    if (room.players.length >= MAX_PLAYERS)
+      return socket.emit("error", "Room full");
     if (room.started) return socket.emit("error", "Game already started");
 
     const player = { id: socket.id, name, hand: [], score: 0 };
@@ -75,10 +76,10 @@ io.on("connection", (socket) => {
     room.started = true;
     room.roundActive = true;
     room.deck = createDeck();
-    room.players.forEach(p => {
+    room.discardPile = [];
+    room.players.forEach((p) => {
       p.hand = room.deck.splice(0, START_CARDS);
     });
-    room.discardPile = []; // UI lo cards chupincham ledu, logic matrame
 
     room.turnIndex = 0;
     room.currentPlayerId = room.players[0].id;
@@ -87,22 +88,32 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("game_update", room);
   });
 
-  // DRAW – only state change (no UI cards needed)
-  socket.on("action_draw", () => {
+  socket.on("action_draw", ({ fromDiscard } = {}) => {
     const [, roomId] = Array.from(socket.rooms);
     const room = rooms.get(roomId);
     if (!room || !room.roundActive) return;
     if (socket.id !== room.currentPlayerId || room.hasDrawn) return;
 
-    const player = room.players.find(p => p.id === socket.id);
-    const card = room.deck.pop();
+    const player = room.players.find((p) => p.id === socket.id);
+    let card = null;
+
+    if (fromDiscard && room.discardPile[0]) {
+      const top = room.discardPile[0];
+      if (!top.rank.match(/7|J/)) {
+        card = room.discardPile.shift();
+      }
+    }
+
+    if (!card && room.deck.length) {
+      card = room.deck.pop();
+    }
+
     if (card) player.hand.push(card);
     room.hasDrawn = true;
 
     io.to(roomId).emit("game_update", room);
   });
 
-  // DROP – just to move turn; selectedIds accept but not rendering cards
   socket.on("action_drop", ({ selectedIds }) => {
     const [, roomId] = Array.from(socket.rooms);
     const room = rooms.get(roomId);
@@ -110,27 +121,20 @@ io.on("connection", (socket) => {
     if (socket.id !== room.currentPlayerId) return;
     if (!room.hasDrawn || !selectedIds || !selectedIds.length) return;
 
-    const player = room.players.find(p => p.id === socket.id);
+    const player = room.players.find((p) => p.id === socket.id);
     const dropSet = new Set(selectedIds.map(Number));
     const remaining = [];
     const dropped = [];
 
     for (const c of player.hand) {
-      if (dropSet.has(c.id)) {
-        dropped.push(c);
-      } else {
-        remaining.push(c);
-      }
+      if (dropSet.has(c.id)) dropped.push(c);
+      else remaining.push(c);
     }
     player.hand = remaining;
-    if (dropped.length) {
-      room.discardPile.unshift(...dropped);
-    }
+    if (dropped.length) room.discardPile.unshift(...dropped);
 
-    // special 7 / J effects on top dropped card (optional, still keep)
     const top = room.discardPile[0];
     if (top && top.rank === "7") {
-      // next player draws 2 and then skipped
       let ni = (room.turnIndex + 1) % room.players.length;
       const np = room.players[ni];
       for (let i = 0; i < 2 && room.deck.length; i++) {
@@ -145,10 +149,10 @@ io.on("connection", (socket) => {
 
     room.currentPlayerId = room.players[room.turnIndex].id;
     room.hasDrawn = false;
+
     io.to(roomId).emit("game_update", room);
   });
 
-  // CLOSE – scoring with your custom penalty rule
   socket.on("action_close", () => {
     const [, roomId] = Array.from(socket.rooms);
     const room = rooms.get(roomId);
@@ -158,40 +162,30 @@ io.on("connection", (socket) => {
 
     room.roundActive = false;
 
-    // calc raw totals
-    room.players.forEach(p => {
+    room.players.forEach((p) => {
       p.roundTotal = p.hand.reduce((s, c) => s + cardValue(c.rank), 0);
     });
 
-    const totals = room.players.map(p => p.roundTotal);
+    const totals = room.players.map((p) => p.roundTotal);
     const minVal = Math.min(...totals);
     const maxVal = Math.max(...totals);
 
-    const closePlayer = room.players.find(p => p.id === socket.id);
+    const closePlayer = room.players.find((p) => p.id === socket.id);
     const isCorrect = closePlayer.roundTotal === minVal;
 
     if (isCorrect) {
-      // correct close: close player 0, others normal
-      room.players.forEach(p => {
-        if (p.id === closePlayer.id) {
-          p.score += 0;
-        } else {
-          p.score += p.roundTotal;
-        }
+      room.players.forEach((p) => {
+        if (p.id === closePlayer.id) p.score += 0;
+        else p.score += p.roundTotal;
       });
     } else {
-      // your custom: lowest -> 0, highest*2 -> goes to closePlayer, others normal
-      const lowestPlayer = room.players.find(p => p.roundTotal === minVal);
-      const highestPlayer = room.players.find(p => p.roundTotal === maxVal);
+      const lowestPlayer = room.players.find((p) => p.roundTotal === minVal);
+      const highestPlayer = room.players.find((p) => p.roundTotal === maxVal);
 
-      room.players.forEach(p => {
-        if (p.id === lowestPlayer.id) {
-          p.score += 0;
-        } else if (p.id === closePlayer.id) {
-          p.score += maxVal * 2;
-        } else {
-          p.score += p.roundTotal;
-        }
+      room.players.forEach((p) => {
+        if (p.id === lowestPlayer.id) p.score += 0;
+        else if (p.id === closePlayer.id) p.score += maxVal * 2;
+        else p.score += p.roundTotal;
       });
     }
 
