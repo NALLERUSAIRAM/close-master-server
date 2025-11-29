@@ -1,4 +1,4 @@
-// server.js FULL CODE (new scoring logic + reconnect fixes included)
+// server.js (PART 1/3) – imports, helpers, startRound, connection start
 
 const express = require("express");
 const http = require("http");
@@ -7,6 +7,7 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
+
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
@@ -73,15 +74,17 @@ function roomStateFor(room, pid) {
 }
 
 function broadcast(room) {
-  room.players.forEach((p) =>
-    io.to(p.id).emit("game_state", roomStateFor(room, p.id))
-  );
+  room.players.forEach((p) => {
+    io.to(p.id).emit("game_state", roomStateFor(room, p.id));
+  });
 }
 
 function randomRoomId() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
   let id = "";
-  for (let i = 0; i < 4; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 4; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
   return id;
 }
 
@@ -158,6 +161,7 @@ function startRound(room) {
   broadcast(room);
 }
 
+// MAIN SOCKET HANDLER
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
@@ -211,27 +215,27 @@ io.on("connection", (socket) => {
     cb?.({ roomId, success: true });
     broadcast(room);
   });
-
-  socket.on("rejoin_room", ({roomId, name}) => {
+  // REJOIN SUPPORT
+  socket.on("rejoin_room", ({ roomId, name }) => {
     console.log(`Rejoin request: ${name} to ${roomId}`);
-    
+
     if (!rooms.has(roomId)) {
-      socket.emit('rejoin_error', {message: 'Room not found'});
+      socket.emit("rejoin_error", { message: "Room not found" });
       return;
     }
-    
+
     const room = rooms.get(roomId);
-    const player = room.players.find(p => p.name === name);
+    const player = room.players.find((p) => p.name === name);
     if (!player) {
-      socket.emit('rejoin_error', {message: 'Player not found in room'});
+      socket.emit("rejoin_error", { message: "Player not found in room" });
       return;
     }
-    
-    // Player ki ID assign chesi current game state pampu
-    socket.youId = player.id;
+
     socket.join(roomId);
+    socket.youId = player.id;
     socket.name = name;
-    socket.emit('rejoin_success', roomStateFor(room, player.id));
+
+    socket.emit("rejoin_success", roomStateFor(room, player.id));
     console.log(`✅ ${name} rejoined ${roomId}`);
   });
 
@@ -258,13 +262,15 @@ io.on("connection", (socket) => {
 
     for (let i = 0; i < count; i++) {
       let card;
-      if (fromDiscard && room.discardPile.length > 0) card = room.discardPile.pop();
-      else {
+      if (fromDiscard && room.discardPile.length > 0) {
+        card = room.discardPile.pop();
+      } else {
         ensureDrawPile(room);
         card = room.drawPile.pop();
       }
       if (card) player.hand.push(card);
     }
+
     player.hasDrawn = true;
     room.pendingDraw = 0;
     broadcast(room);
@@ -277,6 +283,8 @@ io.on("connection", (socket) => {
 
     if (!room.started || room.closeCalled || socket.id !== room.turnId) return;
     const player = room.players.find((p) => p.id === socket.id);
+    if (!player) return;
+
     const ids = data?.selectedIds || [];
     const selected = player.hand.filter((c) => ids.includes(c.id));
     if (!selected.length) return;
@@ -317,76 +325,85 @@ io.on("connection", (socket) => {
     const closerPts = closer ? closer.hand.reduce((s, c) => s + c.value, 0) : 0;
 
     // NEW SCORING LOGIC
-    const playerTotals = room.players.map(p => ({
+    const playerTotals = room.players.map((p) => ({
       player: p,
-      total: p.hand.reduce((s, c) => s + c.value, 0)
+      total: p.hand.reduce((s, c) => s + c.value, 0),
     }));
 
-    // 1. Find lowest score(s)
-    const lowestTotal = Math.min(...playerTotals.map(pt => pt.total));
-    const lowestPlayers = playerTotals.filter(pt => pt.total === lowestTotal);
+    // 1. Lowest total
+    const lowestTotal = Math.min(...playerTotals.map((pt) => pt.total));
+    // 2. Highest total
+    const highestTotal = Math.max(...playerTotals.map((pt) => pt.total));
 
-    // 2. Find highest score
-    const highestTotal = Math.max(...playerTotals.map(pt => pt.total));
-
-    // 3. Calculate round scores
     playerTotals.forEach(({ player, total }) => {
       let roundScore = 0;
-      
-      // Rule 1: Lowest score players → 0 (safe)
+
       if (total === lowestTotal) {
+        // Lowest → 0
         roundScore = 0;
-      }
-      // Rule 2: Closer → if not lowest, highest * 2 penalty (wrong guess)
-      else if (player.id === socket.id) {
+      } else if (player.id === socket.id) {
+        // Closer but not lowest → highest * 2
         roundScore = highestTotal * 2;
-      }
-      // Rule 3: Remaining players → own score
-      else {
+      } else {
+        // Others → own total
         roundScore = total;
       }
-      
+
       player.score = (player.score || 0) + roundScore;
     });
 
-    room.started = false; // back to lobby
+    room.started = false;
     room.log.push(`Close by ${closer?.name} (${closerPts} pts)`);
     broadcast(room);
   });
-});
 
-socket.on("disconnect", () => {
-  for (const [roomId, room] of rooms) {
-    const idx = room.players.findIndex((p) => p.id === socket.id);
-    if (idx !== -1) {
-      const name = room.players[idx].name;
-      room.players.splice(idx, 1);
-      room.log.push(`${name} left`);
+  // PART 2 ENDS HERE
+  // DISCONNECT WITH 60s GRACE
+  socket.on("disconnect", () => {
+    console.log("Disconnected:", socket.id);
 
-      // 60 seconds grace time - immediate room delete kakunda
-      setTimeout(() => {
-        if (rooms.has(roomId) && room.players.length === 0) {
-          rooms.delete(roomId);
-          console.log(`Room ${roomId} deleted (empty after 60s)`);
+    for (const [roomId, room] of rooms) {
+      const idx = room.players.findIndex((p) => p.id === socket.id);
+      if (idx !== -1) {
+        const name = room.players[idx].name;
+        room.players.splice(idx, 1);
+        room.log.push(`${name} left`);
+
+        // 60 seconds grace – room empty ayyaka delay tarvata delete
+        setTimeout(() => {
+          if (rooms.has(roomId)) {
+            const r = rooms.get(roomId);
+            if (r.players.length === 0) {
+              rooms.delete(roomId);
+              console.log(`Room ${roomId} deleted (empty after 60s)`);
+            }
+          }
+        }, 60000);
+
+        if (!room.players.length) {
+          // players lekunte, above timeout lo delete handle avtundi
+          break;
         }
-      }, 60000);
 
-      if (!room.players.length) break;
+        if (room.hostId === socket.id && room.players[0]) {
+          room.hostId = room.players[0].id;
+          room.log.push(`New host: ${room.players[0].name}`);
+        }
 
-      if (room.hostId === socket.id) {
-        room.hostId = room.players[0]?.id;
-        room.log.push(`New host: ${room.players[0]?.name}`);
+        if (!room.players.some((p) => p.id === room.turnId)) {
+          setTurnByIndex(room, 0);
+        }
+
+        broadcast(room);
+        break;
       }
-
-      if (!room.players.some((p) => p.id === room.turnId)) {
-        setTurnByIndex(room, 0);
-      }
-
-      broadcast(room);
-      break;
     }
-  }
+  });
+}); // <-- io.on("connection") close
+
+// SERVER START
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server on ${PORT}`));
