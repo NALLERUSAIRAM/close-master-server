@@ -1,4 +1,4 @@
-// server.js  (full updated code with create_room -> broadcast)
+// server.js FULL CODE (new scoring logic included)
 
 const express = require("express");
 const http = require("http");
@@ -188,7 +188,7 @@ io.on("connection", (socket) => {
     console.log(`Room created: ${roomId}`);
 
     cb?.({ roomId, success: true });
-    broadcast(room); // IMPORTANT: send initial game_state to host
+    broadcast(room);
   });
 
   socket.on("join_room", (data, cb) => {
@@ -206,11 +206,7 @@ io.on("connection", (socket) => {
 
     room.players.push({ id: socket.id, name, score: 0, hand: [], hasDrawn: false });
     socket.join(roomId);
-    room.log.push(`${name} joined. Players: ${room.players.length}/${MAX_PLAYERS}`);
-
-    if (!room.players.some((p) => p.id === room.turnId)) {
-      setTurnByIndex(room, 0);
-    }
+    room.log.push(`${name} joined`);
 
     cb?.({ roomId, success: true });
     broadcast(room);
@@ -267,9 +263,6 @@ io.on("connection", (socket) => {
 
     const openCard = room.discardPile[room.discardPile.length - 1];
 
-    // DRAW LEKUNDA DROP RULE:
-    // 1) Same rank as open card -> any count (1+)
-    // 2) Different rank -> must be at least 3 cards
     if (!player.hasDrawn) {
       const sameAsOpen = openCard && ranks[0] === openCard.rank;
       if (!sameAsOpen && selected.length < 3) {
@@ -298,17 +291,38 @@ io.on("connection", (socket) => {
     room.closeCalled = true;
 
     const closer = room.players.find((p) => p.id === socket.id);
-    const closerPts = closer
-      ? closer.hand.reduce((s, c) => s + c.value, 0)
-      : 0;
+    const closerPts = closer ? closer.hand.reduce((s, c) => s + c.value, 0) : 0;
 
-    const roundScores = room.players.map((p) => {
-      const pts = p.hand.reduce((s, c) => s + c.value, 0);
-      const roundScore = p.id === socket.id || pts < closerPts ? 0 : pts * 2;
-      return { player: p, roundScore };
-    });
+    // NEW SCORING LOGIC
+    const playerTotals = room.players.map(p => ({
+      player: p,
+      total: p.hand.reduce((s, c) => s + c.value, 0)
+    }));
 
-    roundScores.forEach(({ player, roundScore }) => {
+    // 1. Find lowest score(s)
+    const lowestTotal = Math.min(...playerTotals.map(pt => pt.total));
+    const lowestPlayers = playerTotals.filter(pt => pt.total === lowestTotal);
+
+    // 2. Find highest score
+    const highestTotal = Math.max(...playerTotals.map(pt => pt.total));
+
+    // 3. Calculate round scores
+    playerTotals.forEach(({ player, total }) => {
+      let roundScore = 0;
+      
+      // Rule 1: Lowest score players → 0 (safe)
+      if (total === lowestTotal) {
+        roundScore = 0;
+      }
+      // Rule 2: Closer → if not lowest, highest * 2 penalty (wrong guess)
+      else if (player.id === socket.id) {
+        roundScore = highestTotal * 2;
+      }
+      // Rule 3: Remaining players → own score
+      else {
+        roundScore = total;
+      }
+      
       player.score = (player.score || 0) + roundScore;
     });
 
