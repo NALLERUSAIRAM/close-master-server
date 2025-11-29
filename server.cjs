@@ -1,4 +1,4 @@
-// server.js FULL CODE (new scoring logic included)
+// server.js FULL CODE (new scoring logic + reconnect fixes included)
 
 const express = require("express");
 const http = require("http");
@@ -212,6 +212,29 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
+  socket.on("rejoin_room", ({roomId, name}) => {
+    console.log(`Rejoin request: ${name} to ${roomId}`);
+    
+    if (!rooms.has(roomId)) {
+      socket.emit('rejoin_error', {message: 'Room not found'});
+      return;
+    }
+    
+    const room = rooms.get(roomId);
+    const player = room.players.find(p => p.name === name);
+    if (!player) {
+      socket.emit('rejoin_error', {message: 'Player not found in room'});
+      return;
+    }
+    
+    // Player ki ID assign chesi current game state pampu
+    socket.youId = player.id;
+    socket.join(roomId);
+    socket.name = name;
+    socket.emit('rejoin_success', roomStateFor(room, player.id));
+    console.log(`✅ ${name} rejoined ${roomId}`);
+  });
+
   socket.on("start_round", (data) => {
     const roomId = data?.roomId;
     if (!roomId || !rooms.has(roomId)) return;
@@ -330,34 +353,39 @@ io.on("connection", (socket) => {
     room.log.push(`Close by ${closer?.name} (${closerPts} pts)`);
     broadcast(room);
   });
+});
 
-  socket.on("disconnect", () => {
-    for (const [roomId, room] of rooms) {
-      const idx = room.players.findIndex((p) => p.id === socket.id);
-      if (idx !== -1) {
-        const name = room.players[idx].name;
-        room.players.splice(idx, 1);
-        room.log.push(`${name} left`);
+socket.on("disconnect", () => {
+  for (const [roomId, room] of rooms) {
+    const idx = room.players.findIndex((p) => p.id === socket.id);
+    if (idx !== -1) {
+      const name = room.players[idx].name;
+      room.players.splice(idx, 1);
+      room.log.push(`${name} left`);
 
-        if (!room.players.length) {
+      // 60 seconds grace time - immediate room delete kakunda
+      setTimeout(() => {
+        if (rooms.has(roomId) && room.players.length === 0) {
           rooms.delete(roomId);
-          break;
+          console.log(`Room ${roomId} deleted (empty after 60s)`);
         }
+      }, 60000);
 
-        if (room.hostId === socket.id) {
-          room.hostId = room.players[0].id;
-          room.log.push(`New host: ${room.players[0].name}`);
-        }
+      if (!room.players.length) break;
 
-        if (!room.players.some((p) => p.id === room.turnId)) {
-          setTurnByIndex(room, 0);
-        }
-
-        broadcast(room);
-        break;
+      if (room.hostId === socket.id) {
+        room.hostId = room.players[0]?.id;
+        room.log.push(`New host: ${room.players[0]?.name}`);
       }
+
+      if (!room.players.some((p) => p.id === room.turnId)) {
+        setTurnByIndex(room, 0);
+      }
+
+      broadcast(room);
+      break;
     }
-  });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
