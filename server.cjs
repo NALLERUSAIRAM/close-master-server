@@ -1,4 +1,4 @@
-// CLOSE MASTER - FINAL SERVER (with Rule Fixes)
+// CLOSE MASTER - FINAL SERVER (with Rule Fixes + Auto Turn Timeout)
 // =============================================
 
 const express = require("express");
@@ -133,6 +133,60 @@ function advanceTurn(room) {
   }
   const nextIndex = (idx + steps) % room.players.length;
   setTurnByIndex(room, nextIndex);
+}
+
+// ----------------------
+// 🔥 AUTO PLAY TURN (USED FOR TIMEOUT)
+// ----------------------
+function autoPlayTurn(room, player) {
+  if (!room || !room.started || room.closeCalled) return;
+  if (!player || player.id !== room.turnId) return;
+
+  // No cards in hand – just move turn
+  if (!player.hand || player.hand.length === 0) {
+    player.hasDrawn = false;
+    advanceTurn(room);
+    broadcast(room);
+    return;
+  }
+
+  // Need to draw? (either pendingDraw > 0 or player hasn't drawn)
+  const needDraw = room.pendingDraw > 0 || !player.hasDrawn;
+  if (needDraw) {
+    const count = room.pendingDraw > 0 ? room.pendingDraw : 1;
+    for (let i = 0; i < count; i++) {
+      ensureDrawPile(room);
+      const card = room.drawPile.pop();
+      if (card) player.hand.push(card);
+    }
+    room.pendingDraw = 0;
+  }
+
+  // Auto-drop: pick ONE card (here we drop highest value card)
+  let bestIdx = 0;
+  let bestVal = -1;
+  for (let i = 0; i < player.hand.length; i++) {
+    const v = player.hand[i].value ?? cardValue(player.hand[i].rank);
+    if (v > bestVal) {
+      bestVal = v;
+      bestIdx = i;
+    }
+  }
+
+  const card = player.hand.splice(bestIdx, 1)[0];
+  if (card) {
+    room.discardPile.push(card);
+
+    if (card.rank === "J") {
+      room.pendingSkips += 1;
+    } else if (card.rank === "7") {
+      room.pendingDraw += 2;
+    }
+  }
+
+  player.hasDrawn = false;
+  advanceTurn(room);
+  broadcast(room);
 }
 
 // ----------------------
@@ -400,6 +454,18 @@ io.on("connection", (socket) => {
 
     room.started = false;
     broadcast(room);
+  });
+
+  // 🔥 TURN TIMEOUT (60s cross ayithe system auto play)
+  socket.on("turn_timeout", (data) => {
+    const room = rooms.get(data?.roomId);
+    if (!room) return;
+
+    const player = room.players.find((p) => p.socketId === socket.id);
+    if (!player) return;
+
+    // only current turn player ki matrame allow
+    autoPlayTurn(room, player);
   });
 
   // DISCONNECT
