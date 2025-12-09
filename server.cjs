@@ -1,5 +1,5 @@
-// CLOSE MASTER - FINAL SERVER (with Rule Fixes + Auto Turn Timeout)
-// =============================================
+// CLOSE MASTER - FINAL SERVER (with Rule Fixes + Auto Turn Timeout + GIF Reactions)
+// ================================================================================
 
 const express = require("express");
 const http = require("http");
@@ -136,22 +136,14 @@ function advanceTurn(room) {
 }
 
 // ----------------------
-// 🔥 AUTO PLAY TURN (USED FOR TIMEOUT)
+// 🔥 AUTO PLAY TURN (timeout 60s)
 // ----------------------
 function autoPlayTurn(room, player) {
   if (!room || !room.started || room.closeCalled) return;
   if (!player || player.id !== room.turnId) return;
 
-  // No cards in hand – just move turn
-  if (!player.hand || player.hand.length === 0) {
-    player.hasDrawn = false;
-    advanceTurn(room);
-    broadcast(room);
-    return;
-  }
-
-  // Need to draw? (either pendingDraw > 0 or player hasn't drawn)
   const needDraw = room.pendingDraw > 0 || !player.hasDrawn;
+
   if (needDraw) {
     const count = room.pendingDraw > 0 ? room.pendingDraw : 1;
     for (let i = 0; i < count; i++) {
@@ -162,7 +154,6 @@ function autoPlayTurn(room, player) {
     room.pendingDraw = 0;
   }
 
-  // Auto-drop: pick ONE card (here we drop highest value card)
   let bestIdx = 0;
   let bestVal = -1;
   for (let i = 0; i < player.hand.length; i++) {
@@ -176,12 +167,8 @@ function autoPlayTurn(room, player) {
   const card = player.hand.splice(bestIdx, 1)[0];
   if (card) {
     room.discardPile.push(card);
-
-    if (card.rank === "J") {
-      room.pendingSkips += 1;
-    } else if (card.rank === "7") {
-      room.pendingDraw += 2;
-    }
+    if (card.rank === "J") room.pendingSkips += 1;
+    else if (card.rank === "7") room.pendingDraw += 2;
   }
 
   player.hasDrawn = false;
@@ -205,11 +192,9 @@ function startRound(room) {
     p.hasDrawn = false;
   });
 
-  // RULE 1: RANDOM FIRST TURN
   const rand = Math.floor(Math.random() * room.players.length);
   setTurnByIndex(room, rand);
 
-  // deal
   for (let i = 0; i < START_CARDS; i++) {
     room.players.forEach((p) => {
       ensureDrawPile(room);
@@ -222,12 +207,9 @@ function startRound(room) {
   const firstCard = room.drawPile.pop();
   if (firstCard) {
     room.discardPile.push(firstCard);
-
-    if (firstCard.rank === "7") {
-      room.pendingDraw = 2;
-    } else if (firstCard.rank === "J") {
+    if (firstCard.rank === "7") room.pendingDraw = 2;
+    else if (firstCard.rank === "J") {
       room.pendingSkips = 1;
-      // RULE 2: APPLY SKIP IMMEDIATELY
       advanceTurn(room);
     }
   }
@@ -239,6 +221,7 @@ function startRound(room) {
 // SOCKET HANDLERS
 // =============================================
 io.on("connection", (socket) => {
+
   // CREATE ROOM
   socket.on("create_room", (data, cb) => {
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
@@ -289,8 +272,10 @@ io.on("connection", (socket) => {
     if (!rooms.has(roomId)) return cb?.({ error: "Room not found" });
     const room = rooms.get(roomId);
 
-    if (room.players.length >= MAX_PLAYERS) return cb?.({ error: "Room full" });
-    if (room.started) return cb?.({ error: "Game already started" });
+    if (room.players.length >= MAX_PLAYERS)
+      return cb?.({ error: "Room full" });
+    if (room.started)
+      return cb?.({ error: "Game already started" });
 
     let existing = room.players.find((p) => p.id === playerId);
     if (!existing) {
@@ -317,7 +302,7 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // REJOIN
+  // REJOIN ROOM
   socket.on("rejoin_room", ({ roomId, name, playerId }) => {
     if (!rooms.has(roomId)) {
       socket.emit("rejoin_error", { message: "Room not found" });
@@ -355,7 +340,7 @@ io.on("connection", (socket) => {
     startRound(room);
   });
 
-  // DRAW
+  // DRAW CARD
   socket.on("action_draw", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -383,7 +368,7 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // DROP
+  // DROP CARD
   socket.on("action_drop", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -400,19 +385,13 @@ io.on("connection", (socket) => {
 
     const openCard = room.discardPile[room.discardPile.length - 1];
 
-    // RULE 3: If pendingDraw exists (open-card=7), drop allowed ONLY if rank=7
-    if (room.pendingDraw > 0) {
-      if (ranks[0] !== "7") {
-        return; // MUST DRAW
-      }
+    if (room.pendingDraw > 0 && ranks[0] !== "7") {
+      return;
     }
 
-    // normal rule: if not drawn yet:
     if (!player.hasDrawn) {
       const sameAsOpen = openCard && ranks[0] === openCard.rank;
-      if (!sameAsOpen && selected.length < 3 && ranks[0] !== "7") {
-        return;
-      }
+      if (!sameAsOpen && selected.length < 3 && ranks[0] !== "7") return;
     }
 
     player.hand = player.hand.filter((c) => !ids.includes(c.id));
@@ -456,7 +435,7 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // 🔥 TURN TIMEOUT (60s cross ayithe system auto play)
+  // 🔥 TURN TIMEOUT
   socket.on("turn_timeout", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room) return;
@@ -464,8 +443,19 @@ io.on("connection", (socket) => {
     const player = room.players.find((p) => p.socketId === socket.id);
     if (!player) return;
 
-    // only current turn player ki matrame allow
     autoPlayTurn(room, player);
+  });
+
+  // 🔥🔥 NEW: GIF REACTION SUPPORT
+  socket.on("send_reaction", ({ roomId, targetId, gif }) => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    io.to(roomId).emit("play_reaction", {
+      from: socket.playerId,
+      to: targetId,
+      gif,
+    });
   });
 
   // DISCONNECT
