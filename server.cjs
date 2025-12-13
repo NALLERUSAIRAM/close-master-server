@@ -76,6 +76,7 @@ function roomStateFor(room, pid) {
       handSize: p.hand.length,
       hasDrawn: p.hasDrawn,
       online: p.isConnected !== false,
+      face: p.face || null, // 👈 avatar URL to client
     })),
   };
 }
@@ -142,7 +143,6 @@ function autoPlayTurn(room, player) {
   if (!room || !room.started || room.closeCalled) return;
   if (!player || player.id !== room.turnId) return;
 
-  // no cards in hand – just move turn
   if (!player.hand || player.hand.length === 0) {
     player.hasDrawn = false;
     advanceTurn(room);
@@ -150,7 +150,6 @@ function autoPlayTurn(room, player) {
     return;
   }
 
-  // draw if needed (pendingDraw > 0 or has not drawn)
   const needDraw = room.pendingDraw > 0 || !player.hasDrawn;
   if (needDraw) {
     const count = room.pendingDraw > 0 ? room.pendingDraw : 1;
@@ -162,7 +161,6 @@ function autoPlayTurn(room, player) {
     room.pendingDraw = 0;
   }
 
-  // auto-drop: pick ONE highest value card
   let bestIdx = 0;
   let bestVal = -1;
   for (let i = 0; i < player.hand.length; i++) {
@@ -205,11 +203,9 @@ function startRound(room) {
     p.hasDrawn = false;
   });
 
-  // RULE 1: RANDOM FIRST TURN
   const rand = Math.floor(Math.random() * room.players.length);
   setTurnByIndex(room, rand);
 
-  // deal
   for (let i = 0; i < START_CARDS; i++) {
     room.players.forEach((p) => {
       ensureDrawPile(room);
@@ -227,7 +223,6 @@ function startRound(room) {
       room.pendingDraw = 2;
     } else if (firstCard.rank === "J") {
       room.pendingSkips = 1;
-      // RULE 2: APPLY SKIP IMMEDIATELY
       advanceTurn(room);
     }
   }
@@ -243,6 +238,7 @@ io.on("connection", (socket) => {
   socket.on("create_room", (data, cb) => {
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
+    const face = data?.face || null; // 👈 from client
 
     let roomId;
     do roomId = randomRoomId();
@@ -260,6 +256,7 @@ io.on("connection", (socket) => {
         hasDrawn: false,
         isConnected: true,
         disconnectTimeout: null,
+        face, // 👈 store avatar
       }],
       started: false,
       drawPile: [],
@@ -285,6 +282,7 @@ io.on("connection", (socket) => {
     const roomId = (data?.roomId || "").trim().toUpperCase();
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
+    const face = data?.face || null; // 👈 from client
 
     if (!rooms.has(roomId)) return cb?.({ error: "Room not found" });
     const room = rooms.get(roomId);
@@ -303,10 +301,12 @@ io.on("connection", (socket) => {
         hasDrawn: false,
         isConnected: true,
         disconnectTimeout: null,
+        face, // 👈 new joiner avatar
       });
     } else {
       existing.socketId = socket.id;
       existing.isConnected = true;
+      if (face) existing.face = face; // 👈 update avatar if rejoin with new
     }
 
     socket.join(roomId);
@@ -318,7 +318,7 @@ io.on("connection", (socket) => {
   });
 
   // REJOIN
-  socket.on("rejoin_room", ({ roomId, name, playerId }) => {
+  socket.on("rejoin_room", ({ roomId, name, playerId, face }) => {
     if (!rooms.has(roomId)) {
       socket.emit("rejoin_error", { message: "Room not found" });
       return;
@@ -336,6 +336,7 @@ io.on("connection", (socket) => {
 
     player.socketId = socket.id;
     player.isConnected = true;
+    if (face) player.face = face; // optional avatar update
 
     socket.join(roomId);
     socket.playerId = player.id;
@@ -400,14 +401,12 @@ io.on("connection", (socket) => {
 
     const openCard = room.discardPile[room.discardPile.length - 1];
 
-    // RULE 3: If pendingDraw exists (open-card=7), drop allowed ONLY if rank=7
     if (room.pendingDraw > 0) {
       if (ranks[0] !== "7") {
-        return; // MUST DRAW
+        return;
       }
     }
 
-    // normal rule: if not drawn yet:
     if (!player.hasDrawn) {
       const sameAsOpen = openCard && ranks[0] === openCard.rank;
       if (!sameAsOpen && selected.length < 3 && ranks[0] !== "7") {
@@ -456,7 +455,7 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // TURN TIMEOUT (60s cross ayithe system auto play)
+  // TURN TIMEOUT
   socket.on("turn_timeout", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room) return;
@@ -464,24 +463,20 @@ io.on("connection", (socket) => {
     const player = room.players.find((p) => p.socketId === socket.id);
     if (!player) return;
 
-    // only current turn player ki matrame allow
     autoPlayTurn(room, player);
   });
 
-  // GIF REACTION – broadcast to whole room
+  // GIF REACTION
   socket.on("send_gif", ({ roomId, targetId, gifId }) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    // sender room lo unnada check (safety)
     const sender = room.players.find((p) => p.socketId === socket.id);
     if (!sender) return;
 
-    // anni players ki gif_play emit (client side already handle chestundi)
     io.to(roomId).emit("gif_play", { targetId, gifId });
   });
 
-  // DISCONNECT
   socket.on("disconnect", () => {});
 });
 
