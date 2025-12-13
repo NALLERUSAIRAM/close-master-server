@@ -76,7 +76,7 @@ function roomStateFor(room, pid) {
       handSize: p.hand.length,
       hasDrawn: p.hasDrawn,
       online: p.isConnected !== false,
-      face: p.face || null, // 👈 avatar URL to client
+      face: p.face || null,
     })),
   };
 }
@@ -114,12 +114,38 @@ function ensureDrawPile(room) {
   room.drawPile = pile;
 }
 
+// ----------------------
+// TURN + SERVER TIMER
+// ----------------------
+function clearTurnTimeout(room) {
+  if (room.turnTimeout) {
+    clearTimeout(room.turnTimeout);
+    room.turnTimeout = null;
+  }
+}
+
+function scheduleTurnTimeout(room) {
+  clearTurnTimeout(room);
+  if (!room.started || room.closeCalled || !room.players.length) return;
+
+  const TURN_MS = 60000; // 60 seconds
+  const currentTurnId = room.turnId;
+
+  room.turnTimeout = setTimeout(() => {
+    if (!room.started || room.closeCalled) return;
+    const player = room.players.find((p) => p.id === currentTurnId);
+    if (!player) return;
+    autoPlayTurn(room, player);
+  }, TURN_MS);
+}
+
 function setTurnByIndex(room, index) {
   if (!room.players.length) return;
   room.currentIndex =
     ((index % room.players.length) + room.players.length) % room.players.length;
   room.turnId = room.players[room.currentIndex].id;
   room.players.forEach((p) => (p.hasDrawn = false));
+  scheduleTurnTimeout(room);
 }
 
 function advanceTurn(room) {
@@ -238,7 +264,7 @@ io.on("connection", (socket) => {
   socket.on("create_room", (data, cb) => {
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
-    const face = data?.face || null; // 👈 from client
+    const face = data?.face || null;
 
     let roomId;
     do roomId = randomRoomId();
@@ -256,7 +282,7 @@ io.on("connection", (socket) => {
         hasDrawn: false,
         isConnected: true,
         disconnectTimeout: null,
-        face, // 👈 store avatar
+        face,
       }],
       started: false,
       drawPile: [],
@@ -266,6 +292,7 @@ io.on("connection", (socket) => {
       pendingDraw: 0,
       pendingSkips: 0,
       closeCalled: false,
+      turnTimeout: null,
     };
 
     rooms.set(roomId, room);
@@ -282,7 +309,7 @@ io.on("connection", (socket) => {
     const roomId = (data?.roomId || "").trim().toUpperCase();
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
-    const face = data?.face || null; // 👈 from client
+    const face = data?.face || null;
 
     if (!rooms.has(roomId)) return cb?.({ error: "Room not found" });
     const room = rooms.get(roomId);
@@ -301,12 +328,12 @@ io.on("connection", (socket) => {
         hasDrawn: false,
         isConnected: true,
         disconnectTimeout: null,
-        face, // 👈 new joiner avatar
+        face,
       });
     } else {
       existing.socketId = socket.id;
       existing.isConnected = true;
-      if (face) existing.face = face; // 👈 update avatar if rejoin with new
+      if (face) existing.face = face;
     }
 
     socket.join(roomId);
@@ -336,7 +363,7 @@ io.on("connection", (socket) => {
 
     player.socketId = socket.id;
     player.isConnected = true;
-    if (face) player.face = face; // optional avatar update
+    if (face) player.face = face;
 
     socket.join(roomId);
     socket.playerId = player.id;
@@ -381,6 +408,7 @@ io.on("connection", (socket) => {
     player.hasDrawn = true;
     room.pendingDraw = 0;
 
+    // still same turn; timer already running
     broadcast(room);
   });
 
@@ -421,7 +449,7 @@ io.on("connection", (socket) => {
     else if (ranks[0] === "7") room.pendingDraw += 2 * selected.length;
 
     player.hasDrawn = false;
-    advanceTurn(room);
+    advanceTurn(room); // schedules new timeout inside
     broadcast(room);
   });
 
@@ -434,6 +462,7 @@ io.on("connection", (socket) => {
     if (!closer || closer.id !== room.turnId) return;
 
     room.closeCalled = true;
+    clearTurnTimeout(room);
 
     const totals = room.players.map((p) => ({
       player: p,
@@ -455,17 +484,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // TURN TIMEOUT
-  socket.on("turn_timeout", (data) => {
-    const room = rooms.get(data?.roomId);
-    if (!room) return;
-
-    const player = room.players.find((p) => p.socketId === socket.id);
-    if (!player) return;
-
-    autoPlayTurn(room, player);
-  });
-
   // GIF REACTION
   socket.on("send_gif", ({ roomId, targetId, gifId }) => {
     const room = rooms.get(roomId);
@@ -477,7 +495,18 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("gif_play", { targetId, gifId });
   });
 
-  socket.on("disconnect", () => {});
+  // DISCONNECT (optional: mark offline)
+  socket.on("disconnect", () => {
+    const roomId = socket.roomId;
+    const playerId = socket.playerId;
+    if (!roomId || !rooms.has(roomId)) return;
+    const room = rooms.get(roomId);
+    const player = room.players.find((p) => p.id === playerId);
+    if (!player) return;
+    player.isConnected = false;
+    // turn auto-timeout still works because it uses room.turnId, not socketId
+    broadcast(room);
+  });
 });
 
 // START SERVER
