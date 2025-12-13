@@ -115,7 +115,7 @@ function ensureDrawPile(room) {
 }
 
 // ----------------------
-// TURN + SERVER TIMER
+// TURN + SERVER TIMER (20s)
 // ----------------------
 function clearTurnTimeout(room) {
   if (room.turnTimeout) {
@@ -128,7 +128,8 @@ function scheduleTurnTimeout(room) {
   clearTurnTimeout(room);
   if (!room.started || room.closeCalled || !room.players.length) return;
 
-  const TURN_MS = 60000; // 60 seconds
+  const TURN_MS = 20000; // 20 seconds
+
   const currentTurnId = room.turnId;
 
   room.turnTimeout = setTimeout(() => {
@@ -408,7 +409,6 @@ io.on("connection", (socket) => {
     player.hasDrawn = true;
     room.pendingDraw = 0;
 
-    // still same turn; timer already running
     broadcast(room);
   });
 
@@ -449,7 +449,7 @@ io.on("connection", (socket) => {
     else if (ranks[0] === "7") room.pendingDraw += 2 * selected.length;
 
     player.hasDrawn = false;
-    advanceTurn(room); // schedules new timeout inside
+    advanceTurn(room);
     broadcast(room);
   });
 
@@ -495,7 +495,7 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("gif_play", { targetId, gifId });
   });
 
-  // DISCONNECT (optional: mark offline)
+  // DISCONNECT
   socket.on("disconnect", () => {
     const roomId = socket.roomId;
     const playerId = socket.playerId;
@@ -504,7 +504,6 @@ io.on("connection", (socket) => {
     const player = room.players.find((p) => p.id === playerId);
     if (!player) return;
     player.isConnected = false;
-    // turn auto-timeout still works because it uses room.turnId, not socketId
     broadcast(room);
   });
 });
