@@ -364,6 +364,10 @@ io.on("connection", (socket) => {
 
     player.socketId = socket.id;
     player.isConnected = true;
+if (player.disconnectTimeout) {
+  clearTimeout(player.disconnectTimeout);
+  player.disconnectTimeout = null;
+}
     if (face) player.face = face;
 
     socket.join(roomId);
@@ -484,19 +488,60 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // GIF REACTION
-  socket.on("send_gif", ({ roomId, targetId, gifId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
+// GIF REACTION
+socket.on("send_gif", ({ roomId, targetId, gifId }) => {
+  const room = rooms.get(roomId);
+  if (!room) return;
 
-    const sender = room.players.find((p) => p.socketId === socket.id);
-    if (!sender) return;
+  const sender = room.players.find((p) => p.socketId === socket.id);
+  if (!sender) return;
 
-    io.to(roomId).emit("gif_play", { targetId, gifId });
-  });
+  io.to(roomId).emit("gif_play", { targetId, gifId });
+});
 
-  // DISCONNECT
-  socket.on("disconnect", () => {
+/* 👇👇 EXACTLY HERE ADD STEP-1 CODE 👇👇 */
+
+// HOST KICK PLAYER
+socket.on("kick_player", ({ roomId, targetId }) => {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const host = room.players.find(p => p.socketId === socket.id);
+  if (!host || host.id !== room.hostId) return;
+
+  const index = room.players.findIndex(p => p.id === targetId);
+  if (index === -1) return;
+
+  const kicked = room.players[index];
+
+  // If kicked player has turn → advance turn
+  if (room.turnId === kicked.id) {
+    advanceTurn(room);
+  }
+
+  // Remove player
+  room.players.splice(index, 1);
+
+  // Reassign host if needed
+  if (room.hostId === kicked.id && room.players.length > 0) {
+    room.hostId = room.players[0].id;
+  }
+
+  // Notify kicked player
+  if (kicked.socketId) {
+    io.to(kicked.socketId).emit("error", {
+      message: "You were removed by host",
+    });
+  }
+
+  broadcast(room);
+});
+
+/* 👆👆 STEP-1 END 👆👆 */
+
+// DISCONNECT
+socket.on("disconnect", () => {
+
     const roomId = socket.roomId;
     const playerId = socket.playerId;
     if (!roomId || !rooms.has(roomId)) return;
