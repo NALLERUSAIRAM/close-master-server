@@ -8,9 +8,19 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
+// 👇 ADD THIS
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket"], // 🔥 VERY IMPORTANT
+});
 
 const MAX_PLAYERS = 7;
 const START_CARDS = 7;
