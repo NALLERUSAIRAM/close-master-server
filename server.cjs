@@ -6,20 +6,19 @@ const { Server } = require("socket.io");
 const app = express();
 app.use(cors());
 
-// 👇 HEALTH CHECK (Northflank ki idhi chala avasaram)
+// HEALTH CHECK
 app.get("/", (req, res) => {
   res.status(200).send("OK");
 });
 
 const server = http.createServer(app);
 
-// 👇 CONNECTION SETUP (UPDATED FOR STABILITY)
+// CONNECTION SETUP
 const io = new Server(server, {
   cors: {
-    origin: "*", // Ee website nundaina allow chestundi
+    origin: "*",
     methods: ["GET", "POST"],
   },
-  // 🔥 IMPORTANT: Polling add chesam, connection fail avvadhu
   transports: ["polling", "websocket"], 
 });
 
@@ -29,9 +28,6 @@ const RANKS = ["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
 const SUITS = ["♠","♥","♦","♣"];
 let globalCardId = 1;
 
-// ----------------------
-// CARD VALUE
-// ----------------------
 function cardValue(r) {
   if (r === "A") return 1;
   if (r === "JOKER") return 0;
@@ -39,9 +35,6 @@ function cardValue(r) {
   return parseInt(r) || 0;
 }
 
-// ----------------------
-// DECK CREATION
-// ----------------------
 function createDeck() {
   const deck = [];
   for (const s of SUITS) {
@@ -49,11 +42,9 @@ function createDeck() {
       deck.push({ id: globalCardId++, suit: s, rank: r, value: cardValue(r) });
     }
   }
-  // 2 Jokers
   for (let i = 0; i < 2; i++) {
     deck.push({ id: globalCardId++, suit: null, rank: "JOKER", value: 0 });
   }
-  // Shuffle
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -63,9 +54,6 @@ function createDeck() {
 
 const rooms = new Map();
 
-// ----------------------
-// CLIENT STATE FORMAT
-// ----------------------
 function roomStateFor(room, pid) {
   const discardTop = room.discardPile[room.discardPile.length - 1] || null;
   const player = room.players.find((p) => p.id === pid);
@@ -77,6 +65,8 @@ function roomStateFor(room, pid) {
     closeCalled: room.closeCalled,
     currentIndex: room.currentIndex,
     turnId: room.turnId,
+    // 👇 NEW: Send Round Number
+    roundNumber: room.roundNumber || 1, 
     discardTop,
     pendingDraw: room.pendingDraw || 0,
     pendingSkips: room.pendingSkips || 0,
@@ -85,7 +75,7 @@ function roomStateFor(room, pid) {
       id: p.id,
       name: p.name,
       score: p.score || 0,
-      hand: p.id === pid ? p.hand : [], // Only send hand to owner
+      hand: p.id === pid ? p.hand : [],
       handSize: p.hand.length,
       hasDrawn: p.hasDrawn,
       online: p.isConnected !== false,
@@ -94,9 +84,6 @@ function roomStateFor(room, pid) {
   };
 }
 
-// ----------------------
-// BROADCAST FUNCTION
-// ----------------------
 function broadcast(room) {
   room.players.forEach((p) => {
     if (p.socketId) {
@@ -127,9 +114,6 @@ function ensureDrawPile(room) {
   room.drawPile = pile;
 }
 
-// ----------------------
-// TURN & TIMER LOGIC
-// ----------------------
 function clearTurnTimeout(room) {
   if (room.turnTimeout) {
     clearTimeout(room.turnTimeout);
@@ -141,7 +125,7 @@ function scheduleTurnTimeout(room) {
   clearTurnTimeout(room);
   if (!room.started || room.closeCalled || !room.players.length) return;
 
-  const TURN_MS = 20000; // 20 seconds
+  const TURN_MS = 20000;
   const currentTurnId = room.turnId;
 
   room.turnTimeout = setTimeout(() => {
@@ -175,14 +159,10 @@ function advanceTurn(room) {
   setTurnByIndex(room, nextIndex);
 }
 
-// ----------------------
-// AUTO PLAY (TIMEOUT)
-// ----------------------
 function autoPlayTurn(room, player) {
   if (!room || !room.started || room.closeCalled) return;
   if (!player || player.id !== room.turnId) return;
 
-  // If no cards, just pass
   if (!player.hand || player.hand.length === 0) {
     player.hasDrawn = false;
     advanceTurn(room);
@@ -190,7 +170,6 @@ function autoPlayTurn(room, player) {
     return;
   }
 
-  // Draw if needed
   const needDraw = room.pendingDraw > 0 || !player.hasDrawn;
   if (needDraw) {
     const count = room.pendingDraw > 0 ? room.pendingDraw : 1;
@@ -202,7 +181,6 @@ function autoPlayTurn(room, player) {
     room.pendingDraw = 0;
   }
 
-  // Find best card to drop (highest value)
   let bestIdx = 0;
   let bestVal = -1;
   for (let i = 0; i < player.hand.length; i++) {
@@ -225,9 +203,6 @@ function autoPlayTurn(room, player) {
   broadcast(room);
 }
 
-// ----------------------
-// START ROUND
-// ----------------------
 function startRound(room) {
   room.drawPile = createDeck();
   room.discardPile = [];
@@ -244,7 +219,6 @@ function startRound(room) {
   const rand = Math.floor(Math.random() * room.players.length);
   setTurnByIndex(room, rand);
 
-  // Deal 7 cards
   for (let i = 0; i < START_CARDS; i++) {
     room.players.forEach((p) => {
       ensureDrawPile(room);
@@ -253,7 +227,6 @@ function startRound(room) {
     });
   }
 
-  // Open card
   ensureDrawPile(room);
   const firstCard = room.drawPile.pop();
   if (firstCard) {
@@ -269,12 +242,9 @@ function startRound(room) {
   broadcast(room);
 }
 
-// =============================================
 // SOCKET HANDLERS
-// =============================================
 io.on("connection", (socket) => {
   
-  // CREATE ROOM
   socket.on("create_room", (data, cb) => {
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
@@ -307,6 +277,7 @@ io.on("connection", (socket) => {
       pendingSkips: 0,
       closeCalled: false,
       turnTimeout: null,
+      roundNumber: 1, // 👇 NEW: Start at Round 1
     };
 
     rooms.set(roomId, room);
@@ -318,7 +289,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // JOIN ROOM
   socket.on("join_room", (data, cb) => {
     const roomId = (data?.roomId || "").trim().toUpperCase();
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
@@ -358,7 +328,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // REJOIN ROOM
   socket.on("rejoin_room", ({ roomId, name, playerId, face }) => {
     if (!rooms.has(roomId)) {
       socket.emit("rejoin_error", { message: "Room not found" });
@@ -391,7 +360,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // START ROUND
   socket.on("start_round", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room) return;
@@ -401,7 +369,6 @@ io.on("connection", (socket) => {
     startRound(room);
   });
 
-  // DRAW ACTION
   socket.on("action_draw", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -428,7 +395,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // DROP ACTION
   socket.on("action_drop", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -441,7 +407,7 @@ io.on("connection", (socket) => {
     if (!selected.length) return;
 
     const ranks = [...new Set(selected.map((c) => c.rank))];
-    if (ranks.length !== 1) return; // Must drop same rank
+    if (ranks.length !== 1) return;
 
     const openCard = room.discardPile[room.discardPile.length - 1];
 
@@ -465,7 +431,7 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // CLOSE ACTION
+  // CLOSE ACTION (MODIFIED FOR 500 POINTS RESET)
   socket.on("action_close", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -492,18 +458,28 @@ io.on("connection", (socket) => {
       player.score = (player.score || 0) + score;
     });
 
+    // 👇 NEW: Check for 500 Points Reset
+    const anyReached500 = room.players.some(p => p.score >= 500);
+    
+    if (anyReached500) {
+      // RESET GAME
+      room.players.forEach(p => p.score = 0);
+      room.roundNumber = 1; 
+    } else {
+      // NEXT ROUND
+      room.roundNumber = (room.roundNumber || 1) + 1;
+    }
+
     room.started = false;
     broadcast(room);
   });
 
-  // GIF REACTION
   socket.on("send_gif", ({ roomId, targetId, gifId }) => {
     const room = rooms.get(roomId);
     if (!room) return;
     io.to(roomId).emit("gif_play", { targetId, gifId });
   });
 
-  // 🔥 KICK PLAYER (HOST ONLY)
   socket.on("kick_player", ({ roomId, targetId }) => {
     const room = rooms.get(roomId);
     if (!room) return;
@@ -516,26 +492,21 @@ io.on("connection", (socket) => {
 
     const kicked = room.players[index];
 
-    // If kicked player has turn, advance
     if (room.started && room.turnId === kicked.id) {
       advanceTurn(room);
     }
 
-    // Remove player
     room.players.splice(index, 1);
 
-    // Notify kicked player
     if (kicked.socketId) {
       io.to(kicked.socketId).emit("error", { message: "You were removed by host" });
     }
 
-    // If room empty, delete
     if (room.players.length === 0) {
       rooms.delete(roomId);
       return;
     }
 
-    // Reassign host if needed
     if (room.hostId === kicked.id && room.players.length > 0) {
       room.hostId = room.players[0].id;
     }
@@ -543,7 +514,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // DISCONNECT
   socket.on("disconnect", () => {
     const roomId = socket.roomId;
     const playerId = socket.playerId;
@@ -556,7 +526,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// START SERVER
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log("Server running on", PORT);
