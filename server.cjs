@@ -66,7 +66,7 @@ function roomStateFor(room, pid) {
     currentIndex: room.currentIndex,
     turnId: room.turnId,
     // 👇 NEW: Send Round Number
-    roundNumber: room.roundNumber || 1, 
+    roundNumber: room.roundNumber || 1,
     discardTop,
     pendingDraw: room.pendingDraw || 0,
     pendingSkips: room.pendingSkips || 0,
@@ -75,7 +75,7 @@ function roomStateFor(room, pid) {
       id: p.id,
       name: p.name,
       score: p.score || 0,
-      hand: p.id === pid ? p.hand : [],
+      hand: p.id === pid ? p.hand : [], 
       handSize: p.hand.length,
       hasDrawn: p.hasDrawn,
       online: p.isConnected !== false,
@@ -125,7 +125,7 @@ function scheduleTurnTimeout(room) {
   clearTurnTimeout(room);
   if (!room.started || room.closeCalled || !room.players.length) return;
 
-  const TURN_MS = 20000;
+  const TURN_MS = 20000; 
   const currentTurnId = room.turnId;
 
   room.turnTimeout = setTimeout(() => {
@@ -210,6 +210,8 @@ function startRound(room) {
   room.pendingSkips = 0;
   room.closeCalled = false;
   room.started = true;
+  // 👇 NEW: Increment Round Number
+  room.roundNumber = (room.roundNumber || 0) + 1;
 
   room.players.forEach((p) => {
     p.hand = [];
@@ -242,9 +244,7 @@ function startRound(room) {
   broadcast(room);
 }
 
-// SOCKET HANDLERS
 io.on("connection", (socket) => {
-  
   socket.on("create_room", (data, cb) => {
     const name = (data?.name || "Player").trim().slice(0, 15) || "Player";
     const playerId = (data?.playerId || socket.id).toString();
@@ -277,7 +277,8 @@ io.on("connection", (socket) => {
       pendingSkips: 0,
       closeCalled: false,
       turnTimeout: null,
-      roundNumber: 1, // 👇 NEW: Start at Round 1
+      // 👇 NEW: Initialize Round
+      roundNumber: 0, 
     };
 
     rooms.set(roomId, room);
@@ -431,7 +432,6 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  // CLOSE ACTION (MODIFIED FOR 500 POINTS RESET)
   socket.on("action_close", (data) => {
     const room = rooms.get(data?.roomId);
     if (!room || !room.started || room.closeCalled) return;
@@ -458,16 +458,11 @@ io.on("connection", (socket) => {
       player.score = (player.score || 0) + score;
     });
 
-    // 👇 NEW: Check for 500 Points Reset
-    const anyReached500 = room.players.some(p => p.score >= 500);
-    
-    if (anyReached500) {
-      // RESET GAME
-      room.players.forEach(p => p.score = 0);
-      room.roundNumber = 1; 
-    } else {
-      // NEXT ROUND
-      room.roundNumber = (room.roundNumber || 1) + 1;
+    // 👇 🔥 NEW LOGIC: RESET IF 500 REACHED
+    const limitReached = room.players.some((p) => p.score >= 500);
+    if (limitReached) {
+        room.players.forEach((p) => p.score = 0);
+        room.roundNumber = 0; // Next start will make it 1
     }
 
     room.started = false;
