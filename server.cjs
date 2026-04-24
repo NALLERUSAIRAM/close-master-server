@@ -5,8 +5,6 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
-
-// Health Check - సర్వర్ పనిచేస్తుందో లేదో బ్రౌజర్‌లో చూడటానికి
 app.get("/", (req, res) => res.status(200).send("Game Server is Running OK"));
 
 const server = http.createServer(app);
@@ -24,7 +22,7 @@ const cardValue = r => (r === "A" ? 1 : r === "JOKER" ? 0 : ["J", "Q", "K"].incl
 
 const createDeck = () => {
   let deck = [];
-  let id = 1;
+  let id = Date.now();
   SUITS.forEach(s => RANKS.forEach(r => deck.push({ id: id++, suit: s, rank: r, value: cardValue(r) })));
   deck.push({ id: id++, rank: "JOKER", suit: "🃏", value: 0 }, { id: id++, rank: "JOKER", suit: "🃏", value: 0 });
   return deck.sort(() => Math.random() - 0.5);
@@ -51,8 +49,8 @@ const handleClose = (room, closer) => {
   const totals = room.players.map(p => ({ id: p.id, t: p.hand.reduce((s, c) => s + c.value, 0) }));
   const lowest = Math.min(...totals.map(x => x.t));
   const highest = Math.max(...totals.map(x => x.t));
-
   const roundPointsMap = {};
+
   room.players.forEach(p => {
     const total = p.hand.reduce((s, c) => s + c.value, 0);
     let pts = (total === lowest) ? 0 : (p.id === closer.id ? highest * 2 : total);
@@ -66,17 +64,6 @@ const handleClose = (room, closer) => {
   broadcast(room);
 };
 
-const startRound = (room) => {
-  room.started = true; room.roundNumber++; room.penaltyCount = 0;
-  room.drawPile = createDeck(); room.discardPile = [room.drawPile.pop()];
-  room.players.forEach(p => {
-    p.hand = []; for (let i = 0; i < START_CARDS; i++) p.hand.push(room.drawPile.pop());
-    p.hasDrawn = false; p.lastRoundPoints = 0;
-  });
-  room.currentIndex = 0; room.turnId = room.players[0].id;
-  broadcast(room);
-};
-
 io.on("connection", (socket) => {
   socket.on("create_room", (data, cb) => {
     const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -86,26 +73,47 @@ io.on("connection", (socket) => {
 
   socket.on("join_room", (data, cb) => {
     const room = rooms.get(data.roomId);
-    if (!room || room.started) return cb && cb({ error: "Room not found or started" });
+    if (!room || room.started) return cb && cb({ error: "Room error" });
     room.players.push({ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] });
     socket.join(data.roomId); if(cb) cb({ roomId: room.roomId }); broadcast(room);
   });
 
-  socket.on("start_round", d => { const r = rooms.get(d.roomId); if (r) startRound(r); });
+  socket.on("start_round", d => {
+    const r = rooms.get(d.roomId);
+    if (r) {
+      r.started = true; r.roundNumber++; r.penaltyCount = 0;
+      r.drawPile = createDeck(); r.discardPile = [r.drawPile.pop()];
+      r.players.forEach(p => {
+        p.hand = []; for (let i = 0; i < START_CARDS; i++) p.hand.push(r.drawPile.pop());
+        p.hasDrawn = false; p.lastRoundPoints = 0;
+      });
+      r.currentIndex = 0; r.turnId = r.players[0].id;
+      broadcast(r);
+    }
+  });
 
   socket.on("action_draw", data => {
     const room = rooms.get(data.roomId); const p = room?.players.find(x => x.socketId === socket.id);
     if (p && !p.hasDrawn && room.turnId === p.id) {
       if (data.fromDiscard) {
         const top = room.discardPile[room.discardPile.length - 1];
-        if (top.rank === "J" || top.rank === "7") return;
-        p.hand.push(room.discardPile.pop());
+        if (top && top.rank !== "J" && top.rank !== "7") {
+          p.hand.push(room.discardPile.pop());
+          p.hasDrawn = true;
+        }
       } else {
         const take = room.penaltyCount > 0 ? room.penaltyCount : 1;
-        for (let i = 0; i < take; i++) if (room.drawPile.length > 0) p.hand.push(room.drawPile.pop());
-        room.penaltyCount = 0;
+        for (let i = 0; i < take; i++) {
+          if (room.drawPile.length === 0 && room.discardPile.length > 1) {
+            const top = room.discardPile.pop();
+            room.drawPile = room.discardPile.sort(() => Math.random() - 0.5);
+            room.discardPile = [top];
+          }
+          if (room.drawPile.length > 0) p.hand.push(room.drawPile.pop());
+        }
+        p.hasDrawn = true; room.penaltyCount = 0;
       }
-      p.hasDrawn = true; broadcast(room);
+      broadcast(room);
     }
   });
 
@@ -113,6 +121,8 @@ io.on("connection", (socket) => {
     const room = rooms.get(data.roomId); const p = room?.players.find(x => x.socketId === socket.id);
     if (p && p.id === room.turnId) {
       const dropped = p.hand.filter(c => data.selectedIds.includes(c.id));
+      if (dropped.length === 0) return;
+
       const is3Same = dropped.length >= 3 && dropped.every(c => c.rank === dropped[0].rank);
       const isMatch = dropped.some(c => c.rank === room.discardPile[room.discardPile.length - 1]?.rank);
       if (!p.hasDrawn && !is3Same && !isMatch) return;
@@ -130,8 +140,5 @@ io.on("connection", (socket) => {
   socket.on("action_close", d => { const r = rooms.get(d.roomId); const p = r?.players.find(x => x.socketId === socket.id); if (p) handleClose(r, p); });
 });
 
-// ముఖ్యమైన మార్పు: 0.0.0.0 కి బైండ్ చేయడం
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+server.listen(PORT, "0.0.0.0", () => console.log(`Port: ${PORT}`));
