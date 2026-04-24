@@ -13,7 +13,6 @@ const io = new Server(server, {
   transports: ["polling", "websocket"]
 });
 
-const TURN_MS = 20000;
 const START_CARDS = 7;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["♠", "♥", "♦", "♣"];
@@ -45,23 +44,25 @@ const broadcast = (room) => {
   });
 };
 
-const handleClose = (room, closer) => {
-  const totals = room.players.map(p => ({ id: p.id, t: p.hand.reduce((s, c) => s + c.value, 0) }));
-  const lowest = Math.min(...totals.map(x => x.t));
-  const highest = Math.max(...totals.map(x => x.t));
-  const roundPointsMap = {};
-
-  room.players.forEach(p => {
-    const total = p.hand.reduce((s, c) => s + c.value, 0);
-    let pts = (total === lowest) ? 0 : (p.id === closer.id ? highest * 2 : total);
-    p.lastRoundPoints = pts; p.score += pts;
-    roundPointsMap[p.name] = pts;
+const handleExit = (socket) => {
+  rooms.forEach((room, roomId) => {
+    const pIdx = room.players.findIndex(p => p.socketId === socket.id);
+    if (pIdx !== -1) {
+      const exitingP = room.players[pIdx];
+      room.players.splice(pIdx, 1);
+      
+      if (room.players.length === 0) {
+        rooms.delete(roomId);
+      } else {
+        if (room.hostId === exitingP.id) room.hostId = room.players[0].id;
+        if (room.turnId === exitingP.id) {
+          room.currentIndex = room.currentIndex % room.players.length;
+          room.turnId = room.players[room.currentIndex].id;
+        }
+        broadcast(room);
+      }
+    }
   });
-
-  room.roundHistory.push({ round: room.roundNumber, points: roundPointsMap });
-  room.started = false;
-  io.to(room.roomId).emit("close_result", { winner: closer.name });
-  broadcast(room);
 };
 
 io.on("connection", (socket) => {
@@ -73,7 +74,7 @@ io.on("connection", (socket) => {
 
   socket.on("join_room", (data, cb) => {
     const room = rooms.get(data.roomId);
-    if (!room || room.started) return cb && cb({ error: "Room error" });
+    if (!room || room.started) return cb && cb({ error: "Room Error" });
     room.players.push({ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] });
     socket.join(data.roomId); if(cb) cb({ roomId: room.roomId }); broadcast(room);
   });
@@ -122,11 +123,9 @@ io.on("connection", (socket) => {
     if (p && p.id === room.turnId) {
       const dropped = p.hand.filter(c => data.selectedIds.includes(c.id));
       if (dropped.length === 0) return;
-
       const is3Same = dropped.length >= 3 && dropped.every(c => c.rank === dropped[0].rank);
       const isMatch = dropped.some(c => c.rank === room.discardPile[room.discardPile.length - 1]?.rank);
       if (!p.hasDrawn && !is3Same && !isMatch) return;
-
       room.discardPile.push(...dropped);
       p.hand = p.hand.filter(c => !data.selectedIds.includes(c.id));
       let skips = 1;
@@ -137,8 +136,29 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("action_close", d => { const r = rooms.get(d.roomId); const p = r?.players.find(x => x.socketId === socket.id); if (p) handleClose(r, p); });
+  socket.on("action_close", d => {
+    const r = rooms.get(d.roomId); const p = r?.players.find(x => x.socketId === socket.id);
+    if (p) {
+        const totals = r.players.map(pl => ({ id: pl.id, t: pl.hand.reduce((s, c) => s + c.value, 0) }));
+        const lowest = Math.min(...totals.map(x => x.t));
+        const highest = Math.max(...totals.map(x => x.t));
+        const roundPointsMap = {};
+        r.players.forEach(pl => {
+          const total = pl.hand.reduce((s, c) => s + c.value, 0);
+          let pts = (total === lowest) ? 0 : (pl.id === p.id ? highest * 2 : total);
+          pl.lastRoundPoints = pts; pl.score += pts;
+          roundPointsMap[pl.name] = pts;
+        });
+        r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
+        r.started = false;
+        io.to(r.roomId).emit("close_result", { winner: p.name });
+        broadcast(r);
+    }
+  });
+
+  socket.on("exit_room", () => handleExit(socket));
+  socket.on("disconnect", () => handleExit(socket));
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => console.log(`Port: ${PORT}`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Running on ${PORT}`));
