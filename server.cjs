@@ -34,29 +34,29 @@ const broadcast = (room) => {
       roundHistory: room.roundHistory || [],
       players: room.players.map(pl => ({
         id: pl.id, name: pl.name, score: pl.score, handSize: pl.hand.length,
-        hasDrawn: pl.hasDrawn, lastRoundPoints: pl.lastRoundPoints, hand: pl.id === p.id ? pl.hand : []
+        hasDrawn: pl.hasDrawn, lastRoundPoints: pl.lastRoundPoints || 0, hand: pl.id === p.id ? pl.hand : []
       }))
     });
   });
 };
 
 const handleClose = (room, closer) => {
-  if (room.turnTimeout) clearTimeout(room.turnTimeout);
-  const totals = room.players.map(p => ({ id: p.id, name: p.name, t: p.hand.reduce((s, c) => s + c.value, 0) }));
+  const totals = room.players.map(p => ({ id: p.id, t: p.hand.reduce((s, c) => s + c.value, 0) }));
   const lowest = Math.min(...totals.map(x => x.t));
   const highest = Math.max(...totals.map(x => x.t));
 
-  const roundPoints = {};
-  totals.forEach(({ id, t }) => {
-    let p = room.players.find(pl => pl.id === id);
-    let pts = (t === lowest) ? 0 : (id === closer.id ? highest * 2 : t);
+  const roundPointsMap = {};
+  room.players.forEach(p => {
+    const playerTotal = p.hand.reduce((s, c) => s + c.value, 0);
+    let pts = (playerTotal === lowest) ? 0 : (p.id === closer.id ? highest * 2 : playerTotal);
     p.lastRoundPoints = pts;
     p.score += pts;
-    roundPoints[p.name] = pts;
+    roundPointsMap[p.name] = pts;
   });
 
-  room.roundHistory.push({ round: room.roundNumber, points: roundPoints });
+  room.roundHistory.push({ round: room.roundNumber, points: roundPointsMap });
   room.started = false;
+  if (room.turnTimeout) clearTimeout(room.turnTimeout);
   io.to(room.roomId).emit("close_result", { winner: closer.name });
   broadcast(room);
 };
