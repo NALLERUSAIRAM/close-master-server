@@ -5,8 +5,15 @@ const { Server } = require("socket.io");
 
 const app = express();
 app.use(cors());
+
+// Health Check - సర్వర్ పనిచేస్తుందో లేదో బ్రౌజర్‌లో చూడటానికి
+app.get("/", (req, res) => res.status(200).send("Game Server is Running OK"));
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" }, transports: ["polling", "websocket"] });
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["polling", "websocket"]
+});
 
 const TURN_MS = 20000;
 const START_CARDS = 7;
@@ -47,16 +54,14 @@ const handleClose = (room, closer) => {
 
   const roundPointsMap = {};
   room.players.forEach(p => {
-    const playerTotal = p.hand.reduce((s, c) => s + c.value, 0);
-    let pts = (playerTotal === lowest) ? 0 : (p.id === closer.id ? highest * 2 : playerTotal);
-    p.lastRoundPoints = pts;
-    p.score += pts;
+    const total = p.hand.reduce((s, c) => s + c.value, 0);
+    let pts = (total === lowest) ? 0 : (p.id === closer.id ? highest * 2 : total);
+    p.lastRoundPoints = pts; p.score += pts;
     roundPointsMap[p.name] = pts;
   });
 
   room.roundHistory.push({ round: room.roundNumber, points: roundPointsMap });
   room.started = false;
-  if (room.turnTimeout) clearTimeout(room.turnTimeout);
   io.to(room.roomId).emit("close_result", { winner: closer.name });
   broadcast(room);
 };
@@ -76,14 +81,14 @@ io.on("connection", (socket) => {
   socket.on("create_room", (data, cb) => {
     const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const room = { roomId, hostId: data.playerId, players: [{ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] }], started: false, roundNumber: 0, discardPile: [], roundHistory: [], penaltyCount: 0 };
-    rooms.set(roomId, room); socket.join(roomId); cb({ roomId }); broadcast(room);
+    rooms.set(roomId, room); socket.join(roomId); if(cb) cb({ roomId }); broadcast(room);
   });
 
   socket.on("join_room", (data, cb) => {
     const room = rooms.get(data.roomId);
-    if (!room || room.started) return cb({ error: "Error" });
+    if (!room || room.started) return cb && cb({ error: "Room not found or started" });
     room.players.push({ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] });
-    socket.join(data.roomId); cb({ roomId: room.roomId }); broadcast(room);
+    socket.join(data.roomId); if(cb) cb({ roomId: room.roomId }); broadcast(room);
   });
 
   socket.on("start_round", d => { const r = rooms.get(d.roomId); if (r) startRound(r); });
@@ -97,7 +102,7 @@ io.on("connection", (socket) => {
         p.hand.push(room.discardPile.pop());
       } else {
         const take = room.penaltyCount > 0 ? room.penaltyCount : 1;
-        for (let i = 0; i < take; i++) if (room.drawPile.length) p.hand.push(room.drawPile.pop());
+        for (let i = 0; i < take; i++) if (room.drawPile.length > 0) p.hand.push(room.drawPile.pop());
         room.penaltyCount = 0;
       }
       p.hasDrawn = true; broadcast(room);
@@ -125,4 +130,8 @@ io.on("connection", (socket) => {
   socket.on("action_close", d => { const r = rooms.get(d.roomId); const p = r?.players.find(x => x.socketId === socket.id); if (p) handleClose(r, p); });
 });
 
-server.listen(process.env.PORT || 3000);
+// ముఖ్యమైన మార్పు: 0.0.0.0 కి బైండ్ చేయడం
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server is running on port ${PORT}`);
+});
