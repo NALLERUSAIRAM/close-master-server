@@ -13,7 +13,7 @@ const io = new Server(server, {
   transports: ["polling", "websocket"]
 });
 
-const TURN_TIME_LIMIT = 30;
+const TURN_TIME_LIMIT = 90; // 90 Seconds Timer for Cards Show & Set Show
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["♠", "♥", "♦", "♣"];
 
@@ -55,7 +55,7 @@ const handleTimeout = (room) => {
     if (room.drawPile.length > 0) currentP.hand.push(room.drawPile.pop());
   }
 
-  if (room.gameType === "set_show" && currentP.hand.length > 13) {
+  if (currentP.hand.length > 13) {
       const dropCard = currentP.hand.pop();
       room.discardPile.push(dropCard);
   }
@@ -87,7 +87,18 @@ const broadcast = (room) => {
   });
 };
 
-// Calculate Penalty Points for Set Show
+const calculateCardsShowPoints = (hand) => {
+  const ranks = hand.map(c => c.rank);
+  const nonJokers = ranks.filter(r => r !== "JOKER");
+  const uniqueNonJokers = [...new Set(nonJokers)];
+  let jokerCount = ranks.filter(r => r === "JOKER").length;
+  const allRanks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+  let missingRanks = allRanks.filter(r => !uniqueNonJokers.includes(r));
+  let missingValues = missingRanks.map(r => cardValue(r)).sort((a, b) => b - a);
+  while (jokerCount > 0 && missingValues.length > 0) { missingValues.shift(); jokerCount--; }
+  return missingValues.reduce((sum, val) => sum + val, 0);
+};
+
 const calculateSetShowPoints = (hand) => {
   return hand.reduce((sum, c) => sum + c.value, 0);
 };
@@ -98,7 +109,7 @@ io.on("connection", (socket) => {
     const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const room = {
       roomId,
-      gameType: data.gameType || "set_show",
+      gameType: data.gameType || "cards_show",
       hostId: data.playerId,
       players: [{ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [], bonusCard: null, bonusUnlocked: false, isOffline: false }],
       started: false, roundNumber: 0, discardPile: [], roundHistory: []
@@ -142,12 +153,12 @@ io.on("connection", (socket) => {
       r.drawPile = createDeck();
       r.discardPile = [r.drawPile.pop()];
       
+      const startCards = r.gameType === "cards_show" ? 13 : 13;
       r.players.forEach(p => {
         p.hand = [];
-        for (let i = 0; i < 13; i++) p.hand.push(r.drawPile.pop());
+        for (let i = 0; i < startCards; i++) p.hand.push(r.drawPile.pop());
         p.hasDrawn = false;
         p.lastRoundPoints = 0;
-        // Assign a random secret bonus card from remaining deck or standard ranks
         const randomRank = RANKS[Math.floor(Math.random() * RANKS.length)];
         const randomSuit = SUITS[Math.floor(Math.random() * SUITS.length)];
         p.bonusCard = { id: 9999 + Math.random(), rank: randomRank, suit: randomSuit, value: cardValue(randomRank) };
@@ -184,18 +195,16 @@ io.on("connection", (socket) => {
     const p = room?.players.find(x => x.socketId === socket.id);
     if (p && p.id === room.turnId && p.hasDrawn) {
       const dropped = p.hand.filter(c => data.selectedIds.includes(c.id));
-      if (dropped.length !== 1) return; // Drop strictly 1 card in Set Show
+      if (dropped.length !== 1) return;
 
       room.discardPile.push(dropped[0]);
       p.hand = p.hand.filter(c => c.id !== dropped[0].id);
 
-      // Check if player has formed a 4-card set to unlock bonus card
-      const ranks = p.hand.map(c => c.rank);
-      const rankCounts = {};
-      ranks.forEach(r => rankCounts[r] = (rankCounts[r] || 0) + 1);
-      const has4CardMatch = Object.values(rankCounts).some(count => count >= 4);
-      if (has4CardMatch) {
-        p.bonusUnlocked = true;
+      if (room.gameType === "set_show") {
+        const ranks = p.hand.map(c => c.rank);
+        const rankCounts = {};
+        ranks.forEach(r => rankCounts[r] = (rankCounts[r] || 0) + 1);
+        if (Object.values(rankCounts).some(count => count >= 4)) p.bonusUnlocked = true;
       }
       
       room.currentIndex = (room.currentIndex + 1) % room.players.length;
@@ -206,21 +215,42 @@ io.on("connection", (socket) => {
     }
   });
 
-  // SET SHOW WIN LOGIC
+  socket.on("action_show_cards", data => {
+    const r = rooms.get(data.roomId);
+    const p = r?.players.find(x => x.socketId === socket.id);
+    if (r && p && r.gameType === "cards_show" && p.hasDrawn) {
+      if (data.selectedIds.length !== 1) { socket.emit("show_error", "Select 1 card to discard."); return; }
+      const dropCard = p.hand.find(c => c.id === data.selectedIds[0]);
+      const finalHand = p.hand.filter(c => c.id !== dropCard.id);
+      const penalty = calculateCardsShowPoints(finalHand);
+      
+      if (penalty === 0) {
+        if (r.timer) clearInterval(r.timer);
+        r.discardPile.push(dropCard);
+        p.hand = finalHand;
+        const roundPointsMap = {};
+        r.players.forEach(pl => {
+          let pts = pl.id === p.id ? 0 : calculateCardsShowPoints(pl.hand);
+          pl.lastRoundPoints = pts; pl.score += pts; roundPointsMap[pl.name] = pts;
+        });
+        r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
+        r.started = false;
+        io.to(r.roomId).emit("close_result", { winner: p.name });
+        broadcast(r);
+      } else {
+        socket.emit("show_error", "Invalid Hand! Missing unique ranks.");
+      }
+    }
+  });
+
   socket.on("action_show_set", data => {
     const r = rooms.get(data.roomId);
     const p = r?.players.find(x => x.socketId === socket.id);
-    
     if (r && p && r.gameType === "set_show" && p.hasDrawn) {
-      if (data.selectedIds.length !== 1) {
-         socket.emit("show_error", "Please select 1 card to discard for Show.");
-         return;
-      }
-      
+      if (data.selectedIds.length !== 1) { socket.emit("show_error", "Select 1 card to discard."); return; }
       const dropCard = p.hand.find(c => c.id === data.selectedIds[0]);
-      const finalHand = p.hand.filter(c => c.id !== dropCard.id); // 13 cards remaining
-
-      // Basic Set Validation: Check if player has 4-card match and valid sets structure
+      const finalHand = p.hand.filter(c => c.id !== dropCard.id);
+      
       const ranks = finalHand.map(c => c.rank);
       const rankCounts = {};
       ranks.forEach(r => rankCounts[r] = (rankCounts[r] || 0) + 1);
@@ -230,21 +260,17 @@ io.on("connection", (socket) => {
         if (r.timer) clearInterval(r.timer);
         r.discardPile.push(dropCard);
         p.hand = finalHand;
-
         const roundPointsMap = {};
         r.players.forEach(pl => {
           let pts = pl.id === p.id ? 0 : calculateSetShowPoints(pl.hand);
-          pl.lastRoundPoints = pts;
-          pl.score += pts;
-          roundPointsMap[pl.name] = pts;
+          pl.lastRoundPoints = pts; pl.score += pts; roundPointsMap[pl.name] = pts;
         });
-
         r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
         r.started = false;
         io.to(r.roomId).emit("close_result", { winner: p.name });
         broadcast(r);
       } else {
-        socket.emit("show_error", "Invalid Sets! You need a 4-card set and valid 3-card sets.");
+        socket.emit("show_error", "Invalid Sets!");
       }
     }
   });
