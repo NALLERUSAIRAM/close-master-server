@@ -14,6 +14,7 @@ const io = new Server(server, {
 });
 
 const START_CARDS = 7;
+const TURN_TIME_LIMIT = 30; // 30 Seconds turn time limit
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["♠", "♥", "♦", "♣"];
 
@@ -29,35 +30,86 @@ const createDeck = () => {
 
 const rooms = new Map();
 
+// --- 30 SECONDS TURN TIMER LOGIC ---
+const startTurnTimer = (room) => {
+  if (room.timer) clearInterval(room.timer);
+  room.turnTimeLeft = TURN_TIME_LIMIT;
+
+  room.timer = setInterval(() => {
+    room.turnTimeLeft--;
+    
+    // Broadcast remaining time to all clients
+    io.to(room.roomId).emit("timer_tick", { turnTimeLeft: room.turnTimeLeft, turnId: room.turnId });
+
+    if (room.turnTimeLeft <= 0) {
+      clearInterval(room.timer);
+      handleTimeout(room);
+    }
+  }, 1000);
+};
+
+// Turn time aipoyinappudu Auto Action (Draw 1 card & Pass Turn)
+const handleTimeout = (room) => {
+  const currentP = room.players.find(p => p.id === room.turnId);
+  if (!currentP) return;
+
+  // Auto Draw if not drawn
+  if (!currentP.hasDrawn) {
+    const take = room.penaltyCount > 0 ? room.penaltyCount : 1;
+    for (let i = 0; i < take; i++) {
+      if (room.drawPile.length === 0 && room.discardPile.length > 1) {
+        const top = room.discardPile.pop();
+        room.drawPile = room.discardPile.sort(() => Math.random() - 0.5);
+        room.discardPile = [top];
+      }
+      if (room.drawPile.length > 0) currentP.hand.push(room.drawPile.pop());
+    }
+    room.penaltyCount = 0;
+  }
+
+  // Next player ki turn pass
+  currentP.hasDrawn = false;
+  room.currentIndex = (room.currentIndex + 1) % room.players.length;
+  room.turnId = room.players[room.currentIndex].id;
+  
+  startTurnTimer(room);
+  broadcast(room);
+};
+
 const broadcast = (room) => {
   room.players.forEach(p => {
     io.to(p.socketId).emit("game_state", {
       roomId: room.roomId, hostId: room.hostId, youId: p.id, started: room.started,
       roundNumber: room.roundNumber, turnId: room.turnId, penaltyCount: room.penaltyCount,
+      turnTimeLeft: room.turnTimeLeft || TURN_TIME_LIMIT,
       discardTop: room.discardPile[room.discardPile.length - 1] || null,
       roundHistory: room.roundHistory || [],
       players: room.players.map(pl => ({
         id: pl.id, name: pl.name, score: pl.score, handSize: pl.hand.length,
-        hasDrawn: pl.hasDrawn, lastRoundPoints: pl.lastRoundPoints || 0, hand: pl.id === p.id ? pl.hand : []
+        hasDrawn: pl.hasDrawn, isOffline: pl.isOffline || false,
+        lastRoundPoints: pl.lastRoundPoints || 0, hand: pl.id === p.id ? pl.hand : []
       }))
     });
   });
 };
 
-const handleExit = (socket) => {
+const handleDisconnect = (socket) => {
   rooms.forEach((room, roomId) => {
-    const pIdx = room.players.findIndex(p => p.socketId === socket.id);
-    if (pIdx !== -1) {
-      const exitingP = room.players[pIdx];
-      room.players.splice(pIdx, 1);
-      
-      if (room.players.length === 0) {
+    const p = room.players.find(x => x.socketId === socket.id);
+    if (p) {
+      p.isOffline = true; // Player ni ventane remove cheyakunda offline ga mark chesthunnam
+
+      // Active players evaraina unnara check chestham
+      const activePlayers = room.players.filter(pl => !pl.isOffline);
+      if (activePlayers.length === 0) {
+        if (room.timer) clearInterval(room.timer);
         rooms.delete(roomId);
       } else {
-        if (room.hostId === exitingP.id) room.hostId = room.players[0].id;
-        if (room.turnId === exitingP.id) {
-          room.currentIndex = room.currentIndex % room.players.length;
+        // Disconnect ayina player turn nadusthunte turn skip chestham
+        if (room.turnId === p.id && room.started) {
+          room.currentIndex = (room.currentIndex + 1) % room.players.length;
           room.turnId = room.players[room.currentIndex].id;
+          startTurnTimer(room);
         }
         broadcast(room);
       }
@@ -66,35 +118,78 @@ const handleExit = (socket) => {
 };
 
 io.on("connection", (socket) => {
+
+  // CREATE ROOM
   socket.on("create_room", (data, cb) => {
     const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const room = { roomId, hostId: data.playerId, players: [{ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] }], started: false, roundNumber: 0, discardPile: [], roundHistory: [], penaltyCount: 0 };
-    rooms.set(roomId, room); socket.join(roomId); if(cb) cb({ roomId }); broadcast(room);
+    const room = {
+      roomId,
+      hostId: data.playerId,
+      players: [{ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [], isOffline: false }],
+      started: false,
+      roundNumber: 0,
+      discardPile: [],
+      roundHistory: [],
+      penaltyCount: 0
+    };
+    rooms.set(roomId, room);
+    socket.join(roomId);
+    if (cb) cb({ roomId });
+    broadcast(room);
   });
 
+  // JOIN ROOM (With Reconnect support)
   socket.on("join_room", (data, cb) => {
     const room = rooms.get(data.roomId);
-    if (!room || room.started) return cb && cb({ error: "Room Error" });
-    room.players.push({ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [] });
-    socket.join(data.roomId); if(cb) cb({ roomId: room.roomId }); broadcast(room);
+    if (!room) return cb && cb({ error: "Room Not Found" });
+
+    const existingPlayer = room.players.find(p => p.id === data.playerId);
+
+    if (existingPlayer) {
+      // RECONNECT LOGIC: Tab close chesi malli osthe old ID tho reconnect chestham
+      existingPlayer.socketId = socket.id;
+      existingPlayer.isOffline = false;
+      socket.join(data.roomId);
+      if (cb) cb({ roomId: room.roomId });
+      broadcast(room);
+    } else {
+      // NEW PLAYER JOIN
+      if (room.started) return cb && cb({ error: "Game already started! Wait for next game." });
+      room.players.push({ id: data.playerId, socketId: socket.id, name: data.name, score: 0, hand: [], isOffline: false });
+      socket.join(data.roomId);
+      if (cb) cb({ roomId: room.roomId });
+      broadcast(room);
+    }
   });
 
+  // START ROUND
   socket.on("start_round", d => {
     const r = rooms.get(d.roomId);
     if (r) {
-      r.started = true; r.roundNumber++; r.penaltyCount = 0;
-      r.drawPile = createDeck(); r.discardPile = [r.drawPile.pop()];
+      r.started = true;
+      r.roundNumber++;
+      r.penaltyCount = 0;
+      r.drawPile = createDeck();
+      r.discardPile = [r.drawPile.pop()];
+      
       r.players.forEach(p => {
-        p.hand = []; for (let i = 0; i < START_CARDS; i++) p.hand.push(r.drawPile.pop());
-        p.hasDrawn = false; p.lastRoundPoints = 0;
+        p.hand = [];
+        for (let i = 0; i < START_CARDS; i++) p.hand.push(r.drawPile.pop());
+        p.hasDrawn = false;
+        p.lastRoundPoints = 0;
       });
-      r.currentIndex = 0; r.turnId = r.players[0].id;
+
+      r.currentIndex = 0;
+      r.turnId = r.players[0].id;
+      startTurnTimer(r);
       broadcast(r);
     }
   });
 
+  // DRAW ACTION
   socket.on("action_draw", data => {
-    const room = rooms.get(data.roomId); const p = room?.players.find(x => x.socketId === socket.id);
+    const room = rooms.get(data.roomId);
+    const p = room?.players.find(x => x.socketId === socket.id);
     if (p && !p.hasDrawn && room.turnId === p.id) {
       if (data.fromDiscard) {
         const top = room.discardPile[room.discardPile.length - 1];
@@ -112,52 +207,86 @@ io.on("connection", (socket) => {
           }
           if (room.drawPile.length > 0) p.hand.push(room.drawPile.pop());
         }
-        p.hasDrawn = true; room.penaltyCount = 0;
+        p.hasDrawn = true;
+        room.penaltyCount = 0;
       }
       broadcast(room);
     }
   });
 
+  // DROP ACTION
   socket.on("action_drop", data => {
-    const room = rooms.get(data.roomId); const p = room?.players.find(x => x.socketId === socket.id);
+    const room = rooms.get(data.roomId);
+    const p = room?.players.find(x => x.socketId === socket.id);
     if (p && p.id === room.turnId) {
       const dropped = p.hand.filter(c => data.selectedIds.includes(c.id));
       if (dropped.length === 0) return;
       const is3Same = dropped.length >= 3 && dropped.every(c => c.rank === dropped[0].rank);
       const isMatch = dropped.some(c => c.rank === room.discardPile[room.discardPile.length - 1]?.rank);
       if (!p.hasDrawn && !is3Same && !isMatch) return;
+
       room.discardPile.push(...dropped);
       p.hand = p.hand.filter(c => !data.selectedIds.includes(c.id));
+      
       let skips = 1;
-      dropped.forEach(c => { if (c.rank === "J") skips++; if (c.rank === "7") room.penaltyCount += 2; });
+      dropped.forEach(c => {
+        if (c.rank === "J") skips++;
+        if (c.rank === "7") room.penaltyCount += 2;
+      });
+
       room.currentIndex = (room.currentIndex + skips) % room.players.length;
       room.turnId = room.players[room.currentIndex].id;
-      p.hasDrawn = false; broadcast(room);
+      p.hasDrawn = false;
+      
+      startTurnTimer(room); // Reset 30s timer for next player turn
+      broadcast(room);
     }
   });
 
+  // CLOSE ACTION & MISSED ROUNDS AVERAGE SCORE CALCULATION
   socket.on("action_close", d => {
-    const r = rooms.get(d.roomId); const p = r?.players.find(x => x.socketId === socket.id);
-    if (p) {
-        const totals = r.players.map(pl => ({ id: pl.id, t: pl.hand.reduce((s, c) => s + c.value, 0) }));
-        const lowest = Math.min(...totals.map(x => x.t));
-        const highest = Math.max(...totals.map(x => x.t));
-        const roundPointsMap = {};
-        r.players.forEach(pl => {
+    const r = rooms.get(d.roomId);
+    const p = r?.players.find(x => x.socketId === socket.id);
+    if (r && p) {
+      if (r.timer) clearInterval(r.timer);
+
+      // Active (Online) players hand totals calculation
+      const activePlayers = r.players.filter(pl => !pl.isOffline);
+      const totals = activePlayers.map(pl => ({ id: pl.id, t: pl.hand.reduce((s, c) => s + c.value, 0) }));
+      
+      const lowest = Math.min(...totals.map(x => x.t));
+      const highest = Math.max(...totals.map(x => x.t));
+
+      // Calculate Average Points of active players for missed/offline players
+      const sumActiveScores = totals.reduce((sum, item) => sum + item.t, 0);
+      const avgScore = Math.round(sumActiveScores / (activePlayers.length || 1));
+
+      const roundPointsMap = {};
+
+      r.players.forEach(pl => {
+        let pts = 0;
+        if (pl.isOffline) {
+          // Offline / Missed player gets average score of this round (0 padakunda)
+          pts = avgScore;
+        } else {
           const total = pl.hand.reduce((s, c) => s + c.value, 0);
-          let pts = (total === lowest) ? 0 : (pl.id === p.id ? highest * 2 : total);
-          pl.lastRoundPoints = pts; pl.score += pts;
-          roundPointsMap[pl.name] = pts;
-        });
-        r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
-        r.started = false;
-        io.to(r.roomId).emit("close_result", { winner: p.name });
-        broadcast(r);
+          pts = (total === lowest) ? 0 : (pl.id === p.id ? highest * 2 : total);
+        }
+        pl.lastRoundPoints = pts;
+        pl.score += pts;
+        roundPointsMap[pl.name] = pts;
+      });
+
+      r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
+      r.started = false;
+
+      io.to(r.roomId).emit("close_result", { winner: p.name });
+      broadcast(r);
     }
   });
 
-  socket.on("exit_room", () => handleExit(socket));
-  socket.on("disconnect", () => handleExit(socket));
+  socket.on("exit_room", () => handleDisconnect(socket));
+  socket.on("disconnect", () => handleDisconnect(socket));
 });
 
 const PORT = process.env.PORT || 3000;
