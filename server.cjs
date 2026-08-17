@@ -13,7 +13,7 @@ const io = new Server(server, {
   transports: ["polling", "websocket"]
 });
 
-const TURN_TIME_LIMIT = 90; // 90 Seconds Timer
+const TURN_TIME_LIMIT = 90;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["♠", "♥", "♦", "♣"];
 
@@ -68,6 +68,8 @@ const handleTimeout = (room) => {
 };
 
 const broadcast = (room) => {
+  const activeSockets = room.players.filter(pl => !pl.isOffline).map(pl => pl.socketId);
+
   room.players.forEach(p => {
     io.to(p.socketId).emit("game_state", {
       roomId: room.roomId, gameType: room.gameType, hostId: room.hostId, youId: p.id, started: room.started,
@@ -75,6 +77,7 @@ const broadcast = (room) => {
       turnTimeLeft: room.turnTimeLeft || TURN_TIME_LIMIT,
       discardTop: room.discardPile[room.discardPile.length - 1] || null,
       roundHistory: room.roundHistory || [],
+      activeSockets: activeSockets,
       players: room.players.map(pl => ({
         id: pl.id, name: pl.name, score: pl.score, handSize: pl.hand.length,
         hasDrawn: pl.hasDrawn, isOffline: pl.isOffline || false,
