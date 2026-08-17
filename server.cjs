@@ -13,7 +13,7 @@ const io = new Server(server, {
   transports: ["polling", "websocket"]
 });
 
-const TURN_TIME_LIMIT = 90; // 90 Seconds Timer for Cards Show & Set Show
+const TURN_TIME_LIMIT = 90; // 90 Seconds Timer
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["♠", "♥", "♦", "♣"];
 
@@ -153,7 +153,7 @@ io.on("connection", (socket) => {
       r.drawPile = createDeck();
       r.discardPile = [r.drawPile.pop()];
       
-      const startCards = r.gameType === "cards_show" ? 13 : 13;
+      const startCards = 13;
       r.players.forEach(p => {
         p.hand = [];
         for (let i = 0; i < startCards; i++) p.hand.push(r.drawPile.pop());
@@ -273,6 +273,14 @@ io.on("connection", (socket) => {
         socket.emit("show_error", "Invalid Sets!");
       }
     }
+  });
+
+  // --- VOICE CHAT SIGNALING ---
+  socket.on("voice_signal", (data) => {
+    io.to(data.to).emit("voice_signal", {
+      signal: data.signal,
+      from: socket.id
+    });
   });
 
   const handleDisconnect = (socket) => {
