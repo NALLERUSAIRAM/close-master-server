@@ -890,7 +890,7 @@ io.on("connection", (socket) => {
         J effect
       */
       if (droppedRank === "J") {
-        nextTurn(room, cards.length);
+        nextTurn(room, cards.length + 1);
       }
 
       /*
@@ -988,7 +988,7 @@ io.on("connection", (socket) => {
       room.gameType === "close_master" &&
       cards[0].rank === "J"
     ) {
-      nextTurn(room, cards.length);
+      nextTurn(room, cards.length + 1);
     }
 
     /*
@@ -1037,6 +1037,15 @@ io.on("connection", (socket) => {
       socket.emit(
         "show_error",
         "It is not your turn."
+      );
+      return;
+    }
+
+    // A pending 7 penalty must be resolved before CLOSE.
+    if (room.penaltyCount > 0) {
+      socket.emit(
+        "show_error",
+        "You must play a 7 or draw the penalty before closing."
       );
       return;
     }
