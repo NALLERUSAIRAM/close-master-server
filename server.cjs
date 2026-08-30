@@ -4,11 +4,14 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 
 const app = express();
-
 app.use(cors());
 
 app.get("/", (req, res) => {
-  res.status(200).send("Gully Cards Server is Running");
+  res.status(200).send("Close Master Server is Running");
+});
+
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK");
 });
 
 const server = http.createServer(app);
@@ -41,207 +44,167 @@ const RANKS = [
   "K",
 ];
 
-const rooms = new Map();
-
 const cardValue = (rank) => {
   if (rank === "JOKER") return 0;
   if (rank === "A") return 1;
   if (["J", "Q", "K"].includes(rank)) return 10;
-
-  const n = parseInt(rank, 10);
-  return Number.isNaN(n) ? 0 : n;
+  return Number.parseInt(rank, 10) || 0;
 };
 
-/* =========================================================
+/* -------------------------------------------------------
    DECK
-========================================================= */
+------------------------------------------------------- */
 
-const createDeck = () => {
+function createDeck() {
   const deck = [];
-
   let id = Date.now();
 
-  for (let r = 1; r <= 13; r++) {
-    for (let i = 0; i < 4; i++) {
-      const rank =
-        r === 1
-          ? "A"
-          : r === 11
-          ? "J"
-          : r === 12
-          ? "Q"
-          : r === 13
-          ? "K"
-          : String(r);
+  const suits = ["♥", "♦", "♣", "♠"];
 
+  for (const rank of RANKS) {
+    for (const suit of suits) {
       deck.push({
-        id: id++,
+        id: String(id++),
         rank,
+        suit,
         value: cardValue(rank),
       });
     }
   }
 
-  deck.push(
-    {
-      id: id++,
-      rank: "JOKER",
-      suit: "🃏",
-      value: 0,
-    },
-    {
-      id: id++,
-      rank: "JOKER",
-      suit: "🃏",
-      value: 0,
-    }
+  deck.push({
+    id: String(id++),
+    rank: "JOKER",
+    suit: "🃏",
+    value: 0,
+  });
+
+  deck.push({
+    id: String(id++),
+    rank: "JOKER",
+    suit: "🃏",
+    value: 0,
+  });
+
+  return shuffle(deck);
+}
+
+function shuffle(array) {
+  const arr = [...array];
+
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+
+  return arr;
+}
+
+/* -------------------------------------------------------
+   ROOMS
+------------------------------------------------------- */
+
+const rooms = new Map();
+
+/* -------------------------------------------------------
+   HELPERS
+------------------------------------------------------- */
+
+function activePlayers(room) {
+  return room.players.filter((p) => !p.isOffline);
+}
+
+function currentPlayer(room) {
+  return room.players.find((p) => p.id === room.turnId);
+}
+
+function nextTurn(room, skipCount = 1) {
+  const players = activePlayers(room);
+
+  if (players.length === 0) return;
+
+  const currentActiveIndex = players.findIndex(
+    (p) => p.id === room.turnId
   );
 
-  // Fisher-Yates shuffle
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
+  if (currentActiveIndex === -1) {
+    room.currentIndex = 0;
+    room.turnId = players[0].id;
+    return;
   }
 
-  return deck;
-};
+  const nextIndex =
+    (currentActiveIndex + skipCount) % players.length;
 
-/* =========================================================
-   HELPERS
-========================================================= */
+  room.currentIndex = nextIndex;
+  room.turnId = players[nextIndex].id;
+}
 
-const getPlayerBySocket = (room, socketId) => {
-  return room.players.find((p) => p.socketId === socketId);
-};
+function handScore(player) {
+  return player.hand.reduce(
+    (sum, card) => sum + cardValue(card.rank),
+    0
+  );
+}
 
-const getActivePlayers = (room) => {
-  return room.players.filter((p) => !p.isOffline);
-};
+function reshuffleDiscardIntoDraw(room) {
+  if (room.drawPile.length > 0) return true;
 
-const clearRoomTimer = (room) => {
-  if (room.timer) {
-    clearInterval(room.timer);
-    room.timer = null;
-  }
-};
+  if (room.discardPile.length <= 1) return false;
 
-const refillDrawPile = (room) => {
-  if (
-    room.drawPile.length === 0 &&
-    room.discardPile.length > 1
-  ) {
-    const top = room.discardPile.pop();
+  const top = room.discardPile.pop();
 
-    room.drawPile = room.discardPile;
+  room.drawPile = shuffle(room.discardPile);
+  room.discardPile = [top];
 
-    // Fisher-Yates shuffle
-    for (let i = room.drawPile.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [room.drawPile[i], room.drawPile[j]] = [
-        room.drawPile[j],
-        room.drawPile[i],
-      ];
-    }
+  return room.drawPile.length > 0;
+}
 
-    room.discardPile = [top];
-  }
-};
-
-const drawOneCard = (room, player) => {
-  refillDrawPile(room);
-
-  if (room.drawPile.length === 0) {
-    return null;
-  }
+function drawOne(room, player) {
+  if (!reshuffleDiscardIntoDraw(room)) return null;
 
   const card = room.drawPile.pop();
+
+  if (!card) return null;
 
   player.hand.push(card);
 
   return card;
-};
+}
 
-/* =========================================================
-   BROADCAST
-========================================================= */
+function drawMany(room, player, count) {
+  let drawn = 0;
 
-const broadcast = (room) => {
-  if (!room) return;
+  for (let i = 0; i < count; i++) {
+    const card = drawOne(room, player);
 
-  const publicPlayers = room.players.map((pl) => ({
-    id: pl.id,
-    name: pl.name,
-    score: pl.score,
-    handSize: pl.hand.length,
-    hasDrawn: !!pl.hasDrawn,
-    isOffline: !!pl.isOffline,
-    lastRoundPoints: pl.lastRoundPoints || 0,
-    bonusUnlocked: !!pl.bonusUnlocked,
-  }));
+    if (!card) break;
 
-  room.players.forEach((player) => {
-    if (!player.socketId) return;
+    drawn++;
+  }
 
-    io.to(player.socketId).emit("game_state", {
-      roomId: room.roomId,
-      gameType: room.gameType,
-      hostId: room.hostId,
-      youId: player.id,
+  return drawn;
+}
 
-      started: room.started,
+function stopTimer(room) {
+  if (room.timer) {
+    clearInterval(room.timer);
+    room.timer = null;
+  }
+}
 
-      roundNumber: room.roundNumber,
+function resetPlayerTurnState(player) {
+  player.hasDrawn = false;
+}
 
-      turnId: room.turnId,
-
-      turnTimeLeft:
-        typeof room.turnTimeLeft === "number"
-          ? room.turnTimeLeft
-          : TURN_TIME_LIMIT,
-
-      discardTop:
-        room.discardPile[room.discardPile.length - 1] || null,
-
-      roundHistory: room.roundHistory || [],
-
-      penaltyCount: room.penaltyCount || 0,
-
-      players: room.players.map((pl) => ({
-        ...publicPlayers.find((x) => x.id === pl.id),
-
-        bonusCard:
-          pl.id === player.id
-            ? pl.bonusCard
-            : pl.bonusUnlocked
-            ? pl.bonusCard
-            : null,
-
-        hand:
-          pl.id === player.id
-            ? pl.hand
-            : [],
-      })),
-    });
-  });
-};
-
-/* =========================================================
-   TURN TIMER
-========================================================= */
-
-const startTurnTimer = (room) => {
-  clearRoomTimer(room);
+function startTurnTimer(room) {
+  stopTimer(room);
 
   room.turnTimeLeft = TURN_TIME_LIMIT;
 
   room.timer = setInterval(() => {
-    if (!rooms.has(room.roomId)) {
-      clearRoomTimer(room);
-      return;
-    }
-
-    if (!room.started) {
-      clearRoomTimer(room);
+    if (!rooms.has(room.roomId) || !room.started) {
+      stopTimer(room);
       return;
     }
 
@@ -253,286 +216,397 @@ const startTurnTimer = (room) => {
     });
 
     if (room.turnTimeLeft <= 0) {
-      clearRoomTimer(room);
-
+      stopTimer(room);
       handleTimeout(room);
     }
   }, 1000);
-};
+}
 
-/* =========================================================
-   NEXT TURN
-========================================================= */
+/* -------------------------------------------------------
+   PLAY VALIDATION
+------------------------------------------------------- */
 
-const moveToNextTurn = (room, steps = 1) => {
-  const activePlayers = getActivePlayers(room);
+function sameRank(cards) {
+  if (!cards.length) return false;
 
-  if (activePlayers.length === 0) return;
+  const rank = cards[0].rank;
 
-  let currentPlayerIndex = activePlayers.findIndex(
-    (p) => p.id === room.turnId
-  );
+  return cards.every((card) => card.rank === rank);
+}
 
-  if (currentPlayerIndex < 0) {
-    currentPlayerIndex = 0;
+function canDirectDrop(room, player, cards) {
+  if (!cards.length) {
+    return {
+      valid: false,
+      reason: "Select a card.",
+    };
   }
 
-  const nextIndex =
-    (currentPlayerIndex + steps) % activePlayers.length;
+  // Joker is never actually played.
+  if (cards.some((card) => card.rank === "JOKER")) {
+    return {
+      valid: false,
+      reason: "Joker cannot be dropped.",
+    };
+  }
 
-  const nextPlayer = activePlayers[nextIndex];
-
-  room.currentIndex = room.players.findIndex(
-    (p) => p.id === nextPlayer.id
-  );
-
-  room.turnId = nextPlayer.id;
-};
-
-/* =========================================================
-   TIMEOUT
-========================================================= */
-
-const handleTimeout = (room) => {
-  if (!room || !room.started) return;
-
-  const currentPlayer = room.players.find(
-    (p) => p.id === room.turnId
-  );
-
-  if (!currentPlayer) return;
-
-  if (!currentPlayer.hasDrawn) {
-    drawOneCard(room, currentPlayer);
+  // Multiple cards must always have the same rank.
+  if (cards.length > 1 && !sameRank(cards)) {
+    return {
+      valid: false,
+      reason: "Multiple cards must be the same rank.",
+    };
   }
 
   /*
-    IMPORTANT:
-    Close Master has NO 8-card limit.
-    Therefore we do NOT automatically discard
-    when hand becomes 8+.
+    SPECIAL:
+    If player has already taken penalty cards,
+    they can choose ANY same-rank group.
   */
-
-  currentPlayer.hasDrawn = false;
-
-  moveToNextTurn(room);
-
-  startTurnTimer(room);
-
-  broadcast(room);
-};
-
-/* =========================================================
-   CONNECTION
-========================================================= */
-
-io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
-
-  /* =======================================================
-     CREATE ROOM
-  ======================================================= */
-
-  socket.on("create_room", (data = {}, cb) => {
-    const roomId = Math.random()
-      .toString(36)
-      .substring(2, 6)
-      .toUpperCase();
-
-    const playerId = data.playerId;
-
-    const room = {
-      roomId,
-
-      gameType:
-        data.gameType || "close_master",
-
-      hostId: playerId,
-
-      players: [
-        {
-          id: playerId,
-          socketId: socket.id,
-          name: data.name || "Player",
-
-          score: 0,
-
-          hand: [],
-
-          bonusCard: null,
-
-          bonusUnlocked: false,
-
-          isOffline: false,
-
-          hasDrawn: false,
-
-          lastRoundPoints: 0,
-        },
-      ],
-
-      started: false,
-
-      roundNumber: 0,
-
-      drawPile: [],
-
-      discardPile: [],
-
-      roundHistory: [],
-
-      penaltyCount: 0,
-
-      turnId: null,
-
-      currentIndex: 0,
-
-      turnTimeLeft: TURN_TIME_LIMIT,
-
-      timer: null,
+  if (room.penaltyCount > 0 && player.hasDrawn) {
+    return {
+      valid: true,
+      reason: "",
     };
+  }
 
-    rooms.set(roomId, room);
+  const top = room.discardPile[room.discardPile.length - 1];
 
-    socket.join(roomId);
+  /*
+    3 OR MORE same-rank cards:
+    Can be dropped directly without draw.
+  */
+  if (cards.length >= 3 && sameRank(cards)) {
+    return {
+      valid: true,
+      reason: "",
+    };
+  }
 
-    if (typeof cb === "function") {
-      cb({
-        roomId,
-      });
+  /*
+    Single matching rank:
+    Can be dropped without draw.
+  */
+  if (cards.length === 1) {
+    if (top?.rank === cards[0].rank) {
+      return {
+        valid: true,
+        reason: "",
+      };
+    }
+  }
+
+  /*
+    2 same-rank cards:
+    These require a draw first.
+  */
+  if (cards.length >= 2 && sameRank(cards)) {
+    if (player.hasDrawn) {
+      return {
+        valid: true,
+        reason: "",
+      };
     }
 
+    return {
+      valid: false,
+      reason: "Draw first before dropping this group.",
+    };
+  }
+
+  return {
+    valid: false,
+    reason: "Invalid card. Match the open card or use 3+ same-rank cards.",
+  };
+}
+
+/* -------------------------------------------------------
+   BROADCAST
+------------------------------------------------------- */
+
+function broadcast(room) {
+  room.players.forEach((viewer) => {
+    const visiblePlayers = room.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      score: player.score,
+      handSize: player.hand.length,
+      hasDrawn: !!player.hasDrawn,
+      isOffline: !!player.isOffline,
+      lastRoundPoints: player.lastRoundPoints || 0,
+      hand:
+        player.id === viewer.id
+          ? player.hand
+          : [],
+    }));
+
+    io.to(viewer.socketId).emit("game_state", {
+      roomId: room.roomId,
+      gameType: room.gameType,
+      hostId: room.hostId,
+      youId: viewer.id,
+
+      started: room.started,
+      roundNumber: room.roundNumber,
+
+      turnId: room.turnId,
+      turnTimeLeft:
+        room.turnTimeLeft || TURN_TIME_LIMIT,
+
+      discardTop:
+        room.discardPile[
+          room.discardPile.length - 1
+        ] || null,
+
+      penaltyCount: room.penaltyCount || 0,
+
+      roundHistory: room.roundHistory || [],
+
+      players: visiblePlayers,
+    });
+  });
+}
+
+/* -------------------------------------------------------
+   TIMEOUT
+------------------------------------------------------- */
+
+function handleTimeout(room) {
+  const player = currentPlayer(room);
+
+  if (!player) return;
+
+  /*
+    If 7 penalty is active, timeout means
+    automatically take the entire penalty.
+  */
+  if (room.penaltyCount > 0) {
+    const penaltyCards = room.penaltyCount * 2;
+
+    drawMany(room, player, penaltyCards);
+
+    room.penaltyCount = 0;
+    player.hasDrawn = true;
+
+    /*
+      Player has taken penalty, but timeout ends
+      the turn automatically.
+    */
+    resetPlayerTurnState(player);
+    nextTurn(room, 1);
+    startTurnTimer(room);
     broadcast(room);
+
+    return;
+  }
+
+  /*
+    Normal timeout:
+    automatically draw one card if player hasn't drawn.
+  */
+  if (!player.hasDrawn) {
+    drawOne(room, player);
+  }
+
+  resetPlayerTurnState(player);
+
+  nextTurn(room, 1);
+  startTurnTimer(room);
+  broadcast(room);
+}
+
+/* -------------------------------------------------------
+   SOCKET.IO
+------------------------------------------------------- */
+
+io.on("connection", (socket) => {
+  console.log("Connected:", socket.id);
+
+  /* ---------------------------------------------------
+     CREATE ROOM
+  --------------------------------------------------- */
+
+  socket.on("create_room", (data, callback) => {
+    try {
+      const roomId = Math.random()
+        .toString(36)
+        .substring(2, 6)
+        .toUpperCase();
+
+      const room = {
+        roomId,
+
+        gameType:
+          data.gameType || "close_master",
+
+        hostId: data.playerId,
+
+        players: [
+          {
+            id: data.playerId,
+            socketId: socket.id,
+            name: data.name || "Player",
+            score: 0,
+            hand: [],
+            hasDrawn: false,
+            isOffline: false,
+            lastRoundPoints: 0,
+          },
+        ],
+
+        started: false,
+        roundNumber: 0,
+
+        drawPile: [],
+        discardPile: [],
+
+        penaltyCount: 0,
+
+        currentIndex: 0,
+        turnId: null,
+
+        turnTimeLeft: TURN_TIME_LIMIT,
+        timer: null,
+
+        roundHistory: [],
+      };
+
+      rooms.set(roomId, room);
+
+      socket.join(roomId);
+
+      if (callback) {
+        callback({
+          ok: true,
+          roomId,
+        });
+      }
+
+      broadcast(room);
+    } catch (error) {
+      console.error("CREATE ROOM ERROR:", error);
+
+      if (callback) {
+        callback({
+          ok: false,
+          error: "Could not create room.",
+        });
+      }
+    }
   });
 
-  /* =======================================================
+  /* ---------------------------------------------------
      JOIN ROOM
-  ======================================================= */
+  --------------------------------------------------- */
 
-  socket.on("join_room", (data = {}, cb) => {
-    const roomId = String(data.roomId || "")
-      .trim()
-      .toUpperCase();
+  socket.on("join_room", (data, callback) => {
+    try {
+      const room = rooms.get(data.roomId);
 
-    const room = rooms.get(roomId);
-
-    if (!room) {
-      if (typeof cb === "function") {
-        cb({
+      if (!room) {
+        return callback?.({
+          ok: false,
           error: "Room Not Found",
         });
       }
 
-      return;
-    }
-
-    if (room.started) {
-      if (typeof cb === "function") {
-        cb({
+      if (room.started) {
+        return callback?.({
+          ok: false,
           error: "Game already started!",
         });
       }
 
-      return;
-    }
+      const onlinePlayers = activePlayers(room);
 
-    const activeOnlinePlayers = room.players.filter(
-      (p) => !p.isOffline
-    );
-
-    if (activeOnlinePlayers.length >= 7) {
-      if (typeof cb === "function") {
-        cb({
+      if (onlinePlayers.length >= 7) {
+        return callback?.({
+          ok: false,
           error: "Room is Full! Max 7 players.",
         });
       }
 
-      return;
-    }
+      let player = room.players.find(
+        (p) => p.id === data.playerId
+      );
 
-    const existingPlayer = room.players.find(
-      (p) => p.id === data.playerId
-    );
+      if (player) {
+        player.socketId = socket.id;
+        player.isOffline = false;
+        player.name = data.name || player.name;
+      } else {
+        player = {
+          id: data.playerId,
+          socketId: socket.id,
+          name: data.name || "Player",
+          score: 0,
+          hand: [],
+          hasDrawn: false,
+          isOffline: false,
+          lastRoundPoints: 0,
+        };
 
-    if (existingPlayer) {
-      existingPlayer.socketId = socket.id;
-      existingPlayer.isOffline = false;
-    } else {
-      room.players.push({
-        id: data.playerId,
+        room.players.push(player);
+      }
 
-        socketId: socket.id,
+      socket.join(room.roomId);
 
-        name: data.name || "Player",
-
-        score: 0,
-
-        hand: [],
-
-        bonusCard: null,
-
-        bonusUnlocked: false,
-
-        isOffline: false,
-
-        hasDrawn: false,
-
-        lastRoundPoints: 0,
-      });
-    }
-
-    socket.join(roomId);
-
-    if (typeof cb === "function") {
-      cb({
+      callback?.({
+        ok: true,
         roomId: room.roomId,
       });
-    }
 
-    broadcast(room);
+      broadcast(room);
+    } catch (error) {
+      console.error("JOIN ROOM ERROR:", error);
+
+      callback?.({
+        ok: false,
+        error: "Could not join room.",
+      });
+    }
   });
 
-  /* =======================================================
+  /* ---------------------------------------------------
      START ROUND
-  ======================================================= */
+  --------------------------------------------------- */
 
-  socket.on("start_round", (data = {}) => {
+  socket.on("start_round", (data) => {
     const room = rooms.get(data.roomId);
 
     if (!room) return;
 
-    const activePlayers = getActivePlayers(room);
+    const players = activePlayers(room);
 
-    if (activePlayers.length < 2) {
+    if (players.length < 2) {
       io.to(room.roomId).emit(
         "show_error",
         "Need at least 2 players to start!"
       );
-
       return;
     }
 
     room.started = true;
-
     room.roundNumber++;
 
     room.drawPile = createDeck();
-
-    const initialCard = room.drawPile.pop();
-
-    room.discardPile = [initialCard];
+    room.discardPile = [];
 
     room.penaltyCount = 0;
 
+    /*
+      Close Master = 7 cards
+      Other two games = 13 cards
+    */
     const startCards =
       room.gameType === "close_master"
         ? 7
         : 13;
 
-    room.players.forEach((player) => {
-      if (player.isOffline) return;
-
+    players.forEach((player) => {
       player.hand = [];
+      player.hasDrawn = false;
+      player.lastRoundPoints = 0;
 
       for (let i = 0; i < startCards; i++) {
         const card = room.drawPile.pop();
@@ -541,106 +615,174 @@ io.on("connection", (socket) => {
           player.hand.push(card);
         }
       }
-
-      player.hasDrawn = false;
-
-      player.lastRoundPoints = 0;
-
-      const randomRank =
-        RANKS[
-          Math.floor(
-            Math.random() * RANKS.length
-          )
-        ];
-
-      player.bonusCard = {
-        id: 9999 + Math.random(),
-
-        rank: randomRank,
-
-        value: cardValue(randomRank),
-      };
-
-      player.bonusUnlocked = false;
     });
 
+    /*
+      First/open card.
+    */
+    let initialCard = room.drawPile.pop();
+
+    /*
+      Avoid starting with an unusable situation if possible.
+      Any card is technically allowed, including 7/J/Joker,
+      because their rules are explicitly handled below.
+    */
+    if (!initialCard) {
+      initialCard = {
+        id: `initial-${Date.now()}`,
+        rank: "A",
+        suit: "♠",
+        value: 1,
+      };
+    }
+
+    room.discardPile = [initialCard];
+
     room.currentIndex = 0;
+    room.turnId = players[0].id;
 
-    room.turnId = activePlayers[0].id;
+    /*
+      OPEN 7:
+      Current player receives +2 penalty.
+    */
+    if (
+      room.gameType === "close_master" &&
+      initialCard.rank === "7"
+    ) {
+      room.penaltyCount = 1;
+    }
 
-    /* ---------------------------------------------
-       Close Master opening card
-    --------------------------------------------- */
-
-    if (room.gameType === "close_master") {
-      if (initialCard.rank === "7") {
-        /*
-          Opening 7 = +2 penalty.
-        */
-        room.penaltyCount = 1;
-      } else if (initialCard.rank === "J") {
-        /*
-          Opening J = first player skipped.
-        */
-        moveToNextTurn(room, 2);
-      }
+    /*
+      OPEN J:
+      Current player is skipped.
+      Example:
+      A turn initially
+      Open J
+      A skips
+      B gets turn
+    */
+    if (
+      room.gameType === "close_master" &&
+      initialCard.rank === "J"
+    ) {
+      nextTurn(room, 1);
     }
 
     startTurnTimer(room);
-
     broadcast(room);
   });
 
-  /* =======================================================
+  /* ---------------------------------------------------
      DRAW
-  ======================================================= */
+  --------------------------------------------------- */
 
-  socket.on("action_draw", (data = {}) => {
+  socket.on("action_draw", (data) => {
     const room = rooms.get(data.roomId);
 
-    if (!room) return;
+    if (!room || !room.started) return;
 
-    const player = getPlayerBySocket(
-      room,
-      socket.id
+    const player = room.players.find(
+      (p) => p.socketId === socket.id
     );
 
     if (!player) return;
 
-    if (room.turnId !== player.id) return;
+    if (room.turnId !== player.id) {
+      socket.emit(
+        "show_error",
+        "It is not your turn."
+      );
+      return;
+    }
 
-    if (player.hasDrawn) return;
+    if (player.hasDrawn) {
+      socket.emit(
+        "show_error",
+        "You already drew."
+      );
+      return;
+    }
 
+    /*
+      7 PENALTY
+      Take all penalty cards at once.
+    */
+    if (
+      room.gameType === "close_master" &&
+      room.penaltyCount > 0
+    ) {
+      const amount = room.penaltyCount * 2;
+
+      const drawn = drawMany(
+        room,
+        player,
+        amount
+      );
+
+      if (drawn <= 0) {
+        socket.emit(
+          "show_error",
+          "No cards available to draw."
+        );
+        return;
+      }
+
+      room.penaltyCount = 0;
+
+      player.hasDrawn = true;
+
+      broadcast(room);
+      return;
+    }
+
+    /*
+      DISCARD DRAW
+      7 and J cannot be picked from discard.
+    */
     if (data.fromDiscard) {
-      const topDiscard =
+      const top =
         room.discardPile[
           room.discardPile.length - 1
         ];
 
-      if (!topDiscard) return;
+      if (!top) return;
 
       if (
         room.gameType === "close_master" &&
-        ["7", "J"].includes(topDiscard.rank)
+        ["7", "J"].includes(top.rank)
       ) {
         socket.emit(
           "show_error",
-          "Cannot pick 7 or J from discard pile!"
+          "Cannot pick 7 or J from discard pile."
         );
-
         return;
       }
 
+      /*
+        Joker can be picked or not.
+        It behaves like a normal card for taking.
+      */
       player.hand.push(
         room.discardPile.pop()
       );
-    } else {
-      const card = drawOneCard(
-        room,
-        player
-      );
 
-      if (!card) return;
+      player.hasDrawn = true;
+
+      broadcast(room);
+      return;
+    }
+
+    /*
+      NORMAL DRAW
+    */
+    const card = drawOne(room, player);
+
+    if (!card) {
+      socket.emit(
+        "show_error",
+        "No cards available."
+      );
+      return;
     }
 
     player.hasDrawn = true;
@@ -648,25 +790,28 @@ io.on("connection", (socket) => {
     broadcast(room);
   });
 
-  /* =======================================================
+  /* ---------------------------------------------------
      DROP
-  ======================================================= */
+  --------------------------------------------------- */
 
-  socket.on("action_drop", (data = {}) => {
+  socket.on("action_drop", (data) => {
     const room = rooms.get(data.roomId);
 
-    if (!room) return;
+    if (!room || !room.started) return;
 
-    const player = getPlayerBySocket(
-      room,
-      socket.id
+    const player = room.players.find(
+      (p) => p.socketId === socket.id
     );
 
     if (!player) return;
 
-    if (room.turnId !== player.id) return;
-
-    if (!player.hasDrawn) return;
+    if (room.turnId !== player.id) {
+      socket.emit(
+        "show_error",
+        "It is not your turn."
+      );
+      return;
+    }
 
     const selectedIds = Array.isArray(
       data.selectedIds
@@ -674,838 +819,408 @@ io.on("connection", (socket) => {
       ? data.selectedIds
       : [];
 
-    if (selectedIds.length === 0) return;
-
-    const droppedCards = player.hand.filter(
-      (card) =>
-        selectedIds.includes(card.id)
+    const cards = player.hand.filter((card) =>
+      selectedIds.includes(card.id)
     );
 
-    if (droppedCards.length === 0) return;
-
-    /* ---------------------------------------------
-       Multiple cards must have same rank
-    --------------------------------------------- */
-
-    const firstRank =
-      droppedCards[0].rank;
-
-    const allSameRank =
-      droppedCards.every(
-        (card) => card.rank === firstRank
+    if (!cards.length) {
+      socket.emit(
+        "show_error",
+        "Select cards first."
       );
+      return;
+    }
 
+    /*
+      JOKER CANNOT BE DROPPED
+    */
     if (
-      droppedCards.length > 1 &&
-      !allSameRank
+      cards.some(
+        (card) => card.rank === "JOKER"
+      )
     ) {
       socket.emit(
         "show_error",
-        "Can only drop multiple cards of the same rank!"
+        "Joker cannot be dropped."
       );
-
       return;
     }
 
-    /* ---------------------------------------------
-       CLOSE MASTER
-    --------------------------------------------- */
-
+    /*
+      If penalty was taken, player can now
+      drop ANY same-rank group.
+    */
     if (
-      room.gameType === "close_master"
+      room.gameType === "close_master" &&
+      player.hasDrawn &&
+      room._lastPenaltyDrawPlayer === player.id
     ) {
-      /* -------------------------------------------
-         7 PENALTY ACTIVE
-
-         Player already took penalty cards.
-         They DON'T need to play another 7.
-
-         They can drop ANY valid card/group.
-      ------------------------------------------- */
-
-      if (room.penaltyCount > 0) {
-        droppedCards.forEach((card) => {
-          room.discardPile.push(card);
-        });
-
-        const droppedIds = new Set(
-          droppedCards.map((c) => c.id)
-        );
-
-        player.hand =
-          player.hand.filter(
-            (card) =>
-              !droppedIds.has(card.id)
-          );
-
-        /*
-          Penalty is resolved.
-        */
-
-        room.penaltyCount = 0;
-
-        /*
-          If the dropped card is J,
-          skip next player.
-        */
-
-        const lastDropped =
-          droppedCards[
-            droppedCards.length - 1
-          ];
-
-        player.hasDrawn = false;
-
-        if (lastDropped.rank === "J") {
-          moveToNextTurn(room, 2);
-        } else if (
-          lastDropped.rank === "7"
-        ) {
-          /*
-            IMPORTANT:
-            If player voluntarily plays a 7
-            after taking the penalty, a new
-            +2 penalty starts.
-          */
-          room.penaltyCount = 1;
-
-          moveToNextTurn(room, 1);
-        } else {
-          moveToNextTurn(room, 1);
-        }
-
-        startTurnTimer(room);
-
-        broadcast(room);
-
-        return;
-      }
-
-      /* -------------------------------------------
-         NO PENALTY
-
-         SPECIAL 3+ SAME RANK RULE
-
-         If player has 3 or more cards of the
-         same rank, they can drop that group
-         without taking the middle card when
-         the matching top card/rank isn't available.
-
-         This is handled client-side by allowing
-         the valid same-rank group to be dropped.
-      ------------------------------------------- */
-
-      /*
-        Normal cards are dropped.
-      */
-
-      droppedCards.forEach((card) => {
-        room.discardPile.push(card);
-      });
-
-      const droppedIds = new Set(
-        droppedCards.map((c) => c.id)
-      );
-
-      player.hand =
-        player.hand.filter(
-          (card) =>
-            !droppedIds.has(card.id)
-        );
-
-      const lastDropped =
-        droppedCards[
-          droppedCards.length - 1
-        ];
-
-      /* -------------------------------------------
-         7
-      ------------------------------------------- */
-
-      if (lastDropped.rank === "7") {
-        room.penaltyCount = 1;
-
-        player.hasDrawn = false;
-
-        moveToNextTurn(room, 1);
-
-        startTurnTimer(room);
-
-        broadcast(room);
-
-        return;
-      }
-
-      /* -------------------------------------------
-         J
-      ------------------------------------------- */
-
-      if (lastDropped.rank === "J") {
-        player.hasDrawn = false;
-
-        /*
-          Skip exactly one player.
-        */
-        moveToNextTurn(room, 2);
-
-        startTurnTimer(room);
-
-        broadcast(room);
-
-        return;
-      }
-
-      player.hasDrawn = false;
-
-      moveToNextTurn(room, 1);
-
-      startTurnTimer(room);
-
-      broadcast(room);
-
-      return;
-    }
-
-    /* =====================================================
-       CARDS SHOW
-    ===================================================== */
-
-    if (
-      room.gameType === "cards_show"
-    ) {
-      if (droppedCards.length !== 1) {
+      if (!sameRank(cards)) {
         socket.emit(
           "show_error",
-          "Select 1 card to discard."
+          "After penalty, multiple cards must have the same rank."
         );
-
         return;
       }
 
-      const dropCard =
-        droppedCards[0];
+      room._lastPenaltyDrawPlayer = null;
 
-      player.hand =
-        player.hand.filter(
-          (card) =>
-            card.id !== dropCard.id
-        );
+      const droppedRank = cards[0].rank;
 
-      room.discardPile.push(
-        dropCard
-      );
-
-      player.hasDrawn = false;
-
-      moveToNextTurn(room, 1);
-
-      startTurnTimer(room);
-
-      broadcast(room);
-
-      return;
-    }
-
-    /* =====================================================
-       SET SHOW
-    ===================================================== */
-
-    if (
-      room.gameType === "set_show"
-    ) {
-      droppedCards.forEach((card) => {
+      cards.forEach((card) => {
         room.discardPile.push(card);
       });
 
-      const droppedIds = new Set(
-        droppedCards.map((c) => c.id)
+      player.hand = player.hand.filter(
+        (card) => !selectedIds.includes(card.id)
       );
-
-      player.hand =
-        player.hand.filter(
-          (card) =>
-            !droppedIds.has(card.id)
-        );
-
-      const ranks =
-        player.hand.map(
-          (card) => card.rank
-        );
-
-      const rankCounts = {};
-
-      ranks.forEach((rank) => {
-        if (rank !== "JOKER") {
-          rankCounts[rank] =
-            (rankCounts[rank] || 0) + 1;
-        }
-      });
-
-      if (
-        Object.values(rankCounts).some(
-          (count) => count >= 4
-        )
-      ) {
-        player.bonusUnlocked = true;
-      }
 
       player.hasDrawn = false;
 
-      moveToNextTurn(room, 1);
-
-      startTurnTimer(room);
-
-      broadcast(room);
-
-      return;
-    }
-  });
-
-  /* =======================================================
-     CLOSE MASTER PENALTY RESOLUTION
-
-     Kept as compatibility for existing frontend.
-
-     Player takes penalty cards and then gets
-     another opportunity to play according to
-     the new rule.
-  ======================================================= */
-
-  socket.on(
-    "resolve_penalty",
-    (data = {}) => {
-      const room = rooms.get(
-        data.roomId
-      );
-
-      if (!room) return;
-
-      const player =
-        getPlayerBySocket(
-          room,
-          socket.id
-        );
-
-      if (!player) return;
-
-      if (
-        room.gameType !== "close_master"
-      ) {
-        return;
-      }
-
-      if (room.turnId !== player.id) {
-        return;
-      }
-
-      if (room.penaltyCount <= 0) {
-        return;
-      }
-
-      const totalCards =
-        room.penaltyCount * 2;
-
-      for (
-        let i = 0;
-        i < totalCards;
-        i++
-      ) {
-        const card = drawOneCard(
-          room,
-          player
-        );
-
-        if (!card) break;
+      /*
+        J effect
+      */
+      if (droppedRank === "J") {
+        nextTurn(room, cards.length);
       }
 
       /*
-        IMPORTANT:
-        Do NOT end player's turn here.
-
-        Player must be allowed to drop any
-        valid card/group after taking penalty.
+        7 effect
       */
+      else if (droppedRank === "7") {
+        room.penaltyCount += cards.length;
+        nextTurn(room, 1);
+      }
 
-      player.hasDrawn = true;
+      else {
+        nextTurn(room, 1);
+      }
 
-      room.penaltyCount = 0;
-
+      startTurnTimer(room);
       broadcast(room);
+      return;
     }
-  );
 
-  /* =======================================================
+    /*
+      If penalty is active and player has NOT drawn,
+      only a 7 group can be used to counter it.
+    */
+    if (
+      room.gameType === "close_master" &&
+      room.penaltyCount > 0 &&
+      !player.hasDrawn
+    ) {
+      if (
+        !sameRank(cards) ||
+        cards[0].rank !== "7"
+      ) {
+        socket.emit(
+          "show_error",
+          "You must play a 7 or draw the penalty."
+        );
+        return;
+      }
+
+      cards.forEach((card) => {
+        room.discardPile.push(card);
+      });
+
+      player.hand = player.hand.filter(
+        (card) => !selectedIds.includes(card.id)
+      );
+
+      room.penaltyCount += cards.length;
+
+      player.hasDrawn = false;
+
+      nextTurn(room, 1);
+
+      startTurnTimer(room);
+      broadcast(room);
+      return;
+    }
+
+    /*
+      NORMAL PLAY VALIDATION
+    */
+    const validation = canDirectDrop(
+      room,
+      player,
+      cards
+    );
+
+    if (!validation.valid) {
+      socket.emit(
+        "show_error",
+        validation.reason
+      );
+      return;
+    }
+
+    /*
+      If this was a draw-first play,
+      allow it.
+    */
+    cards.forEach((card) => {
+      room.discardPile.push(card);
+    });
+
+    player.hand = player.hand.filter(
+      (card) => !selectedIds.includes(card.id)
+    );
+
+    player.hasDrawn = false;
+
+    /*
+      SPECIAL J
+      Number of J cards = number of players skipped.
+    */
+    if (
+      room.gameType === "close_master" &&
+      cards[0].rank === "J"
+    ) {
+      nextTurn(room, cards.length);
+    }
+
+    /*
+      SPECIAL 7
+      Number of 7 cards × 2 cards penalty.
+    */
+    else if (
+      room.gameType === "close_master" &&
+      cards[0].rank === "7"
+    ) {
+      room.penaltyCount += cards.length;
+
+      nextTurn(room, 1);
+    }
+
+    else {
+      nextTurn(room, 1);
+    }
+
+    startTurnTimer(room);
+    broadcast(room);
+  });
+
+  /* ---------------------------------------------------
      CLOSE MASTER CLOSE
-  ======================================================= */
+  --------------------------------------------------- */
 
-  socket.on(
-    "action_close",
-    (data = {}) => {
-      const room = rooms.get(
-        data.roomId
+  socket.on("action_close", (data) => {
+    const room = rooms.get(data.roomId);
+
+    if (
+      !room ||
+      !room.started ||
+      room.gameType !== "close_master"
+    ) {
+      return;
+    }
+
+    const player = room.players.find(
+      (p) => p.socketId === socket.id
+    );
+
+    if (!player) return;
+
+    if (room.turnId !== player.id) {
+      socket.emit(
+        "show_error",
+        "It is not your turn."
+      );
+      return;
+    }
+
+    /*
+      Close is based on CURRENT HAND SCORES.
+      No draw is required.
+      No selected card is required.
+    */
+    const scores = room.players.map((p) => ({
+      id: p.id,
+      score: handScore(p),
+    }));
+
+    const myScore = handScore(player);
+
+    const lowestOtherScore = Math.min(
+      ...scores
+        .filter((x) => x.id !== player.id)
+        .map((x) => x.score)
+    );
+
+    /*
+      Strictly lower than everybody = correct.
+      If tied for lowest, it is NOT lower.
+    */
+    const correct =
+      room.players.length <= 1 ||
+      myScore < lowestOtherScore;
+
+    let roundPointsMap = {};
+
+    if (correct) {
+      room.players.forEach((p) => {
+        const points =
+          p.id === player.id
+            ? 0
+            : handScore(p);
+
+        p.lastRoundPoints = points;
+        p.score += points;
+
+        roundPointsMap[p.name] = points;
+      });
+    } else {
+      /*
+        Find highest hand score.
+      */
+      const highestScore = Math.max(
+        ...room.players.map((p) =>
+          handScore(p)
+        )
       );
 
-      if (!room) return;
+      room.players.forEach((p) => {
+        let points;
 
-      const player =
-        getPlayerBySocket(
-          room,
-          socket.id
-        );
+        if (p.id === player.id) {
+          /*
+            Wrong close:
+            highest hand score × 2
+          */
+          points = highestScore * 2;
+        } else {
+          points = handScore(p);
+        }
+
+        p.lastRoundPoints = points;
+        p.score += points;
+
+        roundPointsMap[p.name] = points;
+      });
+    }
+
+    stopTimer(room);
+
+    room.roundHistory.push({
+      round: room.roundNumber,
+      closer: player.name,
+      correct,
+      handScores: Object.fromEntries(
+        room.players.map((p) => [
+          p.name,
+          handScore(p),
+        ])
+      ),
+      points: roundPointsMap,
+    });
+
+    room.started = false;
+
+    io.to(room.roomId).emit(
+      "close_result",
+      {
+        winner: correct ? player.name : null,
+        closer: player.name,
+        correct,
+        points: roundPointsMap,
+      }
+    );
+
+    broadcast(room);
+  });
+
+  /* ---------------------------------------------------
+     OTHER GAME PLACEHOLDERS
+     Existing other game logic can remain separately.
+  --------------------------------------------------- */
+
+  socket.on("action_show_cards", (data) => {
+    const room = rooms.get(data.roomId);
+    const player = room?.players.find(
+      (p) => p.socketId === socket.id
+    );
+
+    if (
+      !room ||
+      !player ||
+      room.gameType !== "cards_show"
+    ) {
+      return;
+    }
+
+    socket.emit(
+      "show_error",
+      "Cards Show logic is unchanged in this Close Master update."
+    );
+  });
+
+  socket.on("action_show_set", (data) => {
+    const room = rooms.get(data.roomId);
+    const player = room?.players.find(
+      (p) => p.socketId === socket.id
+    );
+
+    if (
+      !room ||
+      !player ||
+      room.gameType !== "set_show"
+    ) {
+      return;
+    }
+
+    socket.emit(
+      "show_error",
+      "Set Show logic is unchanged in this Close Master update."
+    );
+  });
+
+  /* ---------------------------------------------------
+     EXIT / DISCONNECT
+  --------------------------------------------------- */
+
+  function handleDisconnect() {
+    rooms.forEach((room, roomId) => {
+      const player = room.players.find(
+        (p) => p.socketId === socket.id
+      );
 
       if (!player) return;
 
-      if (
-        room.gameType !== "close_master"
-      ) {
+      player.isOffline = true;
+
+      const online = activePlayers(room);
+
+      if (online.length === 0) {
+        stopTimer(room);
+        rooms.delete(roomId);
         return;
       }
 
       if (
-        room.turnId !== player.id ||
-        !player.hasDrawn
+        room.started &&
+        room.turnId === player.id
       ) {
-        return;
+        nextTurn(room, 1);
+        startTurnTimer(room);
       }
-
-      const selectedIds =
-        Array.isArray(data.selectedIds)
-          ? data.selectedIds
-          : [];
-
-      if (selectedIds.length !== 1) {
-        socket.emit(
-          "show_error",
-          "Select 1 card to close/discard."
-        );
-
-        return;
-      }
-
-      const dropCard =
-        player.hand.find(
-          (card) =>
-            card.id ===
-            selectedIds[0]
-        );
-
-      if (!dropCard) return;
-
-      clearRoomTimer(room);
-
-      player.hand =
-        player.hand.filter(
-          (card) =>
-            card.id !== dropCard.id
-        );
-
-      room.discardPile.push(
-        dropCard
-      );
-
-      const roundPointsMap = {};
-
-      room.players.forEach(
-        (pl) => {
-          const points =
-            pl.id === player.id
-              ? 0
-              : pl.hand.reduce(
-                  (sum, card) => {
-                    if (
-                      card.rank === "J"
-                    ) {
-                      return sum + 20;
-                    }
-
-                    if (
-                      card.rank === "7"
-                    ) {
-                      return sum + 15;
-                    }
-
-                    return (
-                      sum +
-                      cardValue(
-                        card.rank
-                      )
-                    );
-                  },
-                  0
-                );
-
-          pl.lastRoundPoints =
-            points;
-
-          pl.score += points;
-
-          roundPointsMap[
-            pl.name
-          ] = points;
-        }
-      );
-
-      room.roundHistory.push({
-        round: room.roundNumber,
-        points: roundPointsMap,
-      });
-
-      room.started = false;
-
-      room.penaltyCount = 0;
-
-      player.hasDrawn = false;
-
-      io.to(room.roomId).emit(
-        "close_result",
-        {
-          winner: player.name,
-        }
-      );
 
       broadcast(room);
-    }
-  );
-
-  /* =======================================================
-     CARDS SHOW RESULT
-  ======================================================= */
-
-  socket.on(
-    "action_show_cards",
-    (data = {}) => {
-      const room = rooms.get(
-        data.roomId
-      );
-
-      if (!room) return;
-
-      const player =
-        getPlayerBySocket(
-          room,
-          socket.id
-        );
-
-      if (
-        !player ||
-        room.gameType !==
-          "cards_show" ||
-        room.turnId !== player.id ||
-        !player.hasDrawn
-      ) {
-        return;
-      }
-
-      const selectedIds =
-        Array.isArray(data.selectedIds)
-          ? data.selectedIds
-          : [];
-
-      if (selectedIds.length !== 1) {
-        socket.emit(
-          "show_error",
-          "Select 1 card to discard."
-        );
-
-        return;
-      }
-
-      const dropCard =
-        player.hand.find(
-          (card) =>
-            card.id ===
-            selectedIds[0]
-        );
-
-      if (!dropCard) return;
-
-      clearRoomTimer(room);
-
-      player.hand =
-        player.hand.filter(
-          (card) =>
-            card.id !== dropCard.id
-        );
-
-      room.discardPile.push(
-        dropCard
-      );
-
-      const roundPointsMap = {};
-
-      room.players.forEach(
-        (pl) => {
-          const points =
-            pl.id === player.id
-              ? 0
-              : pl.hand.reduce(
-                  (sum, card) =>
-                    sum +
-                    cardValue(
-                      card.rank
-                    ),
-                  0
-                );
-
-          pl.lastRoundPoints =
-            points;
-
-          pl.score += points;
-
-          roundPointsMap[
-            pl.name
-          ] = points;
-        }
-      );
-
-      room.roundHistory.push({
-        round: room.roundNumber,
-        points: roundPointsMap,
-      });
-
-      room.started = false;
-
-      player.hasDrawn = false;
-
-      io.to(room.roomId).emit(
-        "close_result",
-        {
-          winner: player.name,
-        }
-      );
-
-      broadcast(room);
-    }
-  );
-
-  /* =======================================================
-     SET SHOW
-  ======================================================= */
-
-  socket.on(
-    "action_show_set",
-    (data = {}) => {
-      const room = rooms.get(
-        data.roomId
-      );
-
-      if (!room) return;
-
-      const player =
-        getPlayerBySocket(
-          room,
-          socket.id
-        );
-
-      if (
-        !player ||
-        room.gameType !==
-          "set_show" ||
-        room.turnId !== player.id ||
-        !player.hasDrawn
-      ) {
-        return;
-      }
-
-      const selectedIds =
-        Array.isArray(data.selectedIds)
-          ? data.selectedIds
-          : [];
-
-      if (selectedIds.length !== 1) {
-        socket.emit(
-          "show_error",
-          "Select 1 card to discard."
-        );
-
-        return;
-      }
-
-      const dropCard =
-        player.hand.find(
-          (card) =>
-            card.id ===
-            selectedIds[0]
-        );
-
-      if (!dropCard) return;
-
-      const finalHand =
-        player.hand.filter(
-          (card) =>
-            card.id !== dropCard.id
-        );
-
-      const rankCounts = {};
-
-      finalHand.forEach(
-        (card) => {
-          if (card.rank !== "JOKER") {
-            rankCounts[card.rank] =
-              (rankCounts[card.rank] ||
-                0) + 1;
-          }
-        }
-      );
-
-      const hasValid4CardGroup =
-        Object.values(
-          rankCounts
-        ).some(
-          (count) => count >= 4
-        );
-
-      if (
-        !hasValid4CardGroup &&
-        !player.bonusUnlocked
-      ) {
-        socket.emit(
-          "show_error",
-          "Invalid Sets! 4-card set cannot contain Jokers."
-        );
-
-        return;
-      }
-
-      clearRoomTimer(room);
-
-      room.discardPile.push(
-        dropCard
-      );
-
-      player.hand = finalHand;
-
-      const roundPointsMap = {};
-
-      room.players.forEach(
-        (pl) => {
-          const points =
-            pl.id === player.id
-              ? 0
-              : pl.hand.reduce(
-                  (sum, card) =>
-                    sum +
-                    cardValue(
-                      card.rank
-                    ),
-                  0
-                );
-
-          pl.lastRoundPoints =
-            points;
-
-          pl.score += points;
-
-          roundPointsMap[
-            pl.name
-          ] = points;
-        }
-      );
-
-      room.roundHistory.push({
-        round: room.roundNumber,
-        points: roundPointsMap,
-      });
-
-      room.started = false;
-
-      player.hasDrawn = false;
-
-      io.to(room.roomId).emit(
-        "close_result",
-        {
-          winner: player.name,
-        }
-      );
-
-      broadcast(room);
-    }
-  );
-
-  /* =======================================================
-     SAFE DISCONNECT
-  ======================================================= */
-
-  let cleanedUp = false;
-
-  const handleDisconnect = () => {
-    if (cleanedUp) return;
-
-    cleanedUp = true;
-
-    rooms.forEach(
-      (room, roomId) => {
-        const player =
-          room.players.find(
-            (p) =>
-              p.socketId === socket.id
-          );
-
-        if (!player) return;
-
-        player.isOffline = true;
-
-        const activePlayers =
-          getActivePlayers(room);
-
-        if (activePlayers.length === 0) {
-          clearRoomTimer(room);
-
-          rooms.delete(roomId);
-
-          return;
-        }
-
-        /*
-          If disconnected player was
-          current player, move turn.
-        */
-        if (
-          room.started &&
-          room.turnId === player.id
-        ) {
-          moveToNextTurn(room, 1);
-
-          startTurnTimer(room);
-        }
-
-        broadcast(room);
-      }
-    );
-  };
-
-  /* =======================================================
-     EXIT
-  ======================================================= */
-
-  socket.on("exit_room", () => {
-    handleDisconnect();
-  });
-
-  /* =======================================================
-     DISCONNECT
-  ======================================================= */
-
-  socket.on("disconnect", () => {
-    console.log(
-      "Socket disconnected:",
-      socket.id
-    );
-
-    handleDisconnect();
-  });
+    });
+  }
+
+  socket.on("exit_room", handleDisconnect);
+  socket.on("disconnect", handleDisconnect);
 });
 
-/* =========================================================
-   SERVER START
-========================================================= */
+/* -------------------------------------------------------
+   START SERVER
+------------------------------------------------------- */
 
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Server Running on ${PORT}`
-    );
-  }
-);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `Close Master Server running on port ${PORT}`
+  );
+});
