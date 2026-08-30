@@ -284,8 +284,22 @@ function canDirectDrop(room, player, cards) {
   }
 
   /*
-    Single matching rank:
-    Can be dropped without draw.
+    DRAW-FIRST RULE:
+    Once the player has drawn for this turn, they may drop
+    any single non-Joker card, even if its rank does not
+    match the open card. If multiple cards are selected,
+    they must all have the same rank.
+  */
+  if (player.hasDrawn) {
+    return {
+      valid: true,
+      reason: "",
+    };
+  }
+
+  /*
+    Single card without drawing:
+    It must match the open card.
   */
   if (cards.length === 1) {
     if (top?.rank === cards[0].rank) {
@@ -297,17 +311,9 @@ function canDirectDrop(room, player, cards) {
   }
 
   /*
-    2 same-rank cards:
-    These require a draw first.
+    Two same-rank cards without drawing require a draw first.
   */
   if (cards.length >= 2 && sameRank(cards)) {
-    if (player.hasDrawn) {
-      return {
-        valid: true,
-        reason: "",
-      };
-    }
-
     return {
       valid: false,
       reason: "Draw first before dropping this group.",
@@ -729,7 +735,10 @@ io.on("connection", (socket) => {
 
       room.penaltyCount = 0;
 
+      // Mark this as a completed draw. After taking the penalty,
+      // the player may drop any single card or any same-rank group.
       player.hasDrawn = true;
+      room._lastPenaltyDrawPlayer = player.id;
 
       broadcast(room);
       return;
