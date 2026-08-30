@@ -15,13 +15,11 @@ const io = new Server(server, {
 
 const TURN_TIME_LIMIT = 90; // 90 Seconds Timer
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
-// Note: Suits/logos removed from standard card creation to keep it completely safe and clean for children as requested.
 const cardValue = r => (r === "A" ? 1 : r === "JOKER" ? 0 : ["J", "Q", "K"].includes(r) ? 10 : parseInt(r) || 0);
 
 const createDeck = () => {
   let deck = [];
   let id = Date.now();
-  // Using a clean numeric-based card distribution (Ranks 1 to 13 repeated, without suits)
   for (let r = 1; r <= 13; r++) {
     for (let i = 0; i < 4; i++) {
       let rankStr = r === 1 ? "A" : r === 11 ? "J" : r === 12 ? "Q" : r === 13 ? "K" : r.toString();
@@ -60,7 +58,6 @@ const handleTimeout = (room) => {
     if (room.drawPile.length > 0) currentP.hand.push(room.drawPile.pop());
   }
 
-  // Handle Close Master vs Show timeout limits
   const maxHandSize = room.gameType === 'close_master' ? 8 : 14;
   if (currentP.hand.length > maxHandSize) {
       const dropCard = currentP.hand.pop();
@@ -161,10 +158,9 @@ io.on("connection", (socket) => {
       r.currentIndex = 0; 
       r.turnId = r.players[0].id;
 
-      // Handle Initial Open Card Power for Close Master
       if (r.gameType === 'close_master') {
         if (initialCard.rank === '7') {
-          r.penaltyCount = 1; // 1 stack of 7 penalty
+          r.penaltyCount = 1; 
         } else if (initialCard.rank === 'J') {
           r.currentIndex = (r.currentIndex + 1) % r.players.length;
           r.turnId = r.players[r.currentIndex].id;
@@ -182,7 +178,6 @@ io.on("connection", (socket) => {
     if (p && !p.hasDrawn && room.turnId === p.id) {
       if (data.fromDiscard) {
         let topDiscard = room.discardPile[room.discardPile.length - 1];
-        // Close Master: Cannot pick 7 or J from discard pile
         if (room.gameType === 'close_master' && (topDiscard.rank === '7' || topDiscard.rank === 'J')) {
           socket.emit("show_error", "Cannot pick 7 or J from discard pile!");
           return;
@@ -208,7 +203,6 @@ io.on("connection", (socket) => {
       const droppedCards = p.hand.filter(c => data.selectedIds.includes(c.id));
       if (droppedCards.length === 0) return;
 
-      // For Close Master: Allowing dropping multiple cards of the same rank at once
       const firstRank = droppedCards[0].rank;
       const allSameRank = droppedCards.every(c => c.rank === firstRank);
       if (!allSameRank && droppedCards.length > 1) {
@@ -216,10 +210,8 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // If playing Close Master and dealing with 7 penalty resolution
       if (room.gameType === 'close_master' && room.penaltyCount > 0) {
         if (firstRank === '7') {
-          // Increment penalty count stack
           droppedCards.forEach(card => {
             room.discardPile.push(card);
             p.hand = p.hand.filter(c => c.id !== card.id);
@@ -237,7 +229,6 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Normal drop execution
       droppedCards.forEach(card => {
         room.discardPile.push(card);
         p.hand = p.hand.filter(c => c.id !== card.id);
@@ -247,7 +238,7 @@ io.on("connection", (socket) => {
 
       if (room.gameType === 'close_master') {
         if (lastDropped.rank === '7') {
-          room.penaltyCount = 1; // 7 penalty initiated
+          room.penaltyCount = 1; 
           room.currentIndex = (room.currentIndex + 1) % room.players.length;
           room.turnId = room.players[room.currentIndex].id;
           p.hasDrawn = false;
@@ -256,7 +247,6 @@ io.on("connection", (socket) => {
           return;
         }
         if (lastDropped.rank === 'J') {
-          // J skip power: Skip next player
           room.currentIndex = (room.currentIndex + 2) % room.players.length;
           room.turnId = room.players[room.currentIndex].id;
           p.hasDrawn = false;
@@ -281,7 +271,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Action to resolve 7 Penalty by taking cards (total count = penaltyCount * 2)
   socket.on("resolve_penalty", data => {
     const room = rooms.get(data.roomId);
     const p = room?.players.find(x => x.socketId === socket.id);
@@ -304,7 +293,52 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Set Show Validation Rule: 1 set of 4 cards (NO joker allowed) + 3 sets of 3 cards each (Jokers/Magic cards allowed)
+  socket.on("action_close", data => {
+    const r = rooms.get(data.roomId);
+    const p = r?.players.find(x => x.socketId === socket.id);
+    if (r && p && r.gameType === "close_master" && p.hasDrawn) {
+      if (data.selectedIds.length !== 1) { socket.emit("show_error", "Select 1 card to close/discard."); return; }
+      const dropCard = p.hand.find(c => c.id === data.selectedIds[0]);
+      const finalHand = p.hand.filter(c => c.id !== dropCard.id);
+      
+      if (r.timer) clearInterval(r.timer);
+      r.discardPile.push(dropCard);
+      p.hand = finalHand;
+      const roundPointsMap = {};
+      r.players.forEach(pl => {
+        let pts = pl.id === p.id ? 0 : pl.hand.reduce((sum, c) => sum + (c.rank === 'J' ? 20 : c.rank === '7' ? 15 : cardValue(c.rank)), 0);
+        pl.lastRoundPoints = pts; pl.score += pts; roundPointsMap[pl.name] = pts;
+      });
+      r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
+      r.started = false;
+      io.to(r.roomId).emit("close_result", { winner: p.name });
+      broadcast(r);
+    }
+  });
+
+  socket.on("action_show_cards", data => {
+    const r = rooms.get(data.roomId);
+    const p = r?.players.find(x => x.socketId === socket.id);
+    if (r && p && r.gameType === "cards_show" && p.hasDrawn) {
+      if (data.selectedIds.length !== 1) { socket.emit("show_error", "Select 1 card to discard."); return; }
+      const dropCard = p.hand.find(c => c.id === data.selectedIds[0]);
+      const finalHand = p.hand.filter(c => c.id !== dropCard.id);
+      
+      if (r.timer) clearInterval(r.timer);
+      r.discardPile.push(dropCard);
+      p.hand = finalHand;
+      const roundPointsMap = {};
+      r.players.forEach(pl => {
+        let pts = pl.id === p.id ? 0 : pl.hand.reduce((sum, c) => sum + cardValue(c.rank), 0);
+        pl.lastRoundPoints = pts; pl.score += pts; roundPointsMap[pl.name] = pts;
+      });
+      r.roundHistory.push({ round: r.roundNumber, points: roundPointsMap });
+      r.started = false;
+      io.to(r.roomId).emit("close_result", { winner: p.name });
+      broadcast(r);
+    }
+  });
+
   socket.on("action_show_set", data => {
     const r = rooms.get(data.roomId);
     const p = r?.players.find(x => x.socketId === socket.id);
@@ -320,18 +354,9 @@ io.on("connection", (socket) => {
       });
 
       let hasValid4CardGroupWithoutJoker = false;
-      let remainingHandRanks = [...ranks];
-
-      // Check if there is at least one 4-card set without using Jokers
       for (let rank in rankCounts) {
         if (rankCounts[rank] >= 4) {
           hasValid4CardGroupWithoutJoker = true;
-          // Remove 4 instances of this rank for further 3-card grouping check
-          let removed = 0;
-          remainingHandRanks = remainingHandRanks.filter(r => {
-            if (r === rank && removed < 4) { removed++; return false; }
-            return true;
-          });
           break;
         }
       }
@@ -356,6 +381,9 @@ io.on("connection", (socket) => {
   });
 
   const handleDisconnect = (socket) => {
+    rooms.rooms.forEach((room, roomId) => {
+      // handled cleanly
+    });
     rooms.forEach((room, roomId) => {
       const p = room.players.find(x => x.socketId === socket.id);
       if (p) {
